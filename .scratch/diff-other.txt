@@ -1,0 +1,281 @@
+diff --git a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/controller/QianchuanController.java b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/controller/QianchuanController.java
+index beaff72..da06be4 100644
+--- a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/controller/QianchuanController.java
++++ b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/controller/QianchuanController.java
+@@ -108,6 +108,31 @@ public class QianchuanController {
+         return ResponseDTO.ok(qianchuanService.dashboard(effectiveStart, effectiveEnd));
+     }
+ 
++    @GetMapping("/dashboard/trend")
++    @SaCheckPermission("qianchuan:dashboard")
++    @Operation(summary = "按小时查询投放消耗与成交走势")
++    public ResponseDTO<List<Map<String, Object>>> dashboardTrend(
++            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
++            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate) {
++        LocalDate yesterday = LocalDate.now().minusDays(1);
++        LocalDate effectiveEnd = endDate == null ? yesterday : endDate;
++        LocalDate effectiveStart = startDate == null ? effectiveEnd : startDate;
++        return ResponseDTO.ok(qianchuanService.dashboardTrend(effectiveStart, effectiveEnd));
++    }
++
++    @GetMapping("/sync-status")
++    @Operation(summary = "查询数据同步健康状态（三色点）")
++    public ResponseDTO<Map<String, Object>> syncStatus() {
++        return ResponseDTO.ok(qianchuanService.syncStatus());
++    }
++
++    @PostMapping("/sync/manual")
++    @SaCheckPermission("qianchuan:sync")
++    @Operation(summary = "管理员手动触发报表同步（异步）")
++    public ResponseDTO<Map<String, Object>> manualSync() {
++        return ResponseDTO.ok(qianchuanService.manualSync());
++    }
++
+     @PostMapping("/sync")
+     @SaCheckPermission("qianchuan:sync")
+     @Operation(summary = "同步千川账户及小时报表")
+diff --git a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/domain/QianchuanApiClient.java b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/domain/QianchuanApiClient.java
+index 49a3c0d..0be5f11 100644
+--- a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/domain/QianchuanApiClient.java
++++ b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/domain/QianchuanApiClient.java
+@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
+ import com.fasterxml.jackson.databind.ObjectMapper;
+ import com.fasterxml.jackson.databind.node.ArrayNode;
+ import jakarta.annotation.Resource;
++import lombok.extern.slf4j.Slf4j;
+ import org.springframework.beans.factory.annotation.Value;
+ import org.springframework.stereotype.Component;
+ 
+@@ -21,6 +22,7 @@ import java.util.List;
+ import java.util.Map;
+ import java.util.Scanner;
+ 
++@Slf4j
+ @Component
+ public class QianchuanApiClient {
+ 
+@@ -29,6 +31,11 @@ public class QianchuanApiClient {
+     private static final int API_PAGE_SIZE = 100;
+     private static final long MIN_REQUEST_INTERVAL_MILLIS = 1000;
+     private static final long[] RATE_LIMIT_RETRY_DELAYS_MILLIS = {15000, 30000, 60000, 120000};
++    /** 传输失败不紧密重试；仅少量长间隔后放弃，由上层账户容错续跑。 */
++    private static final long[] TRANSPORT_RETRY_DELAYS_MILLIS = {30000, 60000};
++    /** 连续传输失败达到阈值后冷却，避免在对端掐连接时继续砸请求。 */
++    private static final int TRANSPORT_FAILURE_THRESHOLD = 3;
++    private static final long TRANSPORT_COOLDOWN_MILLIS = 3 * 60 * 1000L;
+ 
+     @Value("${qianchuan.app-id:}")
+     private String appId;
+@@ -43,6 +50,8 @@ public class QianchuanApiClient {
+     private ObjectMapper objectMapper;
+ 
+     private long lastRequestStartedAtMillis;
++    private long requestSequence;
++    private int consecutiveTransportFailures;
+ 
+     public String buildAuthorizationUrl(String state) {
+         requireConfigured();
+@@ -98,6 +107,20 @@ public class QianchuanApiClient {
+         return response.path("data");
+     }
+ 
++    /**
++     * 查询账户支持的 uni_promotion 报表 data_topic + dimensions + metrics。
++     * 接口：GET /open_api/v1.0/qianchuan/report/uni_promotion/config/get/
++     * 返回 data.custom_config_datas 数组，每项含 data_topic / dimensions / metrics。
++     */
++    public JsonNode reportUniPromotionConfig(String accessToken, long advertiserId) {
++        Map<String, String> query = new LinkedHashMap<>();
++        query.put("advertiser_id", String.valueOf(advertiserId));
++        query.put("data_topics", json(List.of("SITE_PROMOTION_PRODUCT_AD")));
++        JsonNode response = get(API + "/open_api/v1.0/qianchuan/report/uni_promotion/config/get/",
++                headers(accessToken), query);
++        return response.path("data").path("custom_config_datas");
++    }
++
+     public JsonNode reportByHour(String accessToken, long advertiserId, String statDate) {
+         Map<String, String> query = new LinkedHashMap<>();
+         query.put("advertiser_id", String.valueOf(advertiserId));
+@@ -108,7 +131,7 @@ public class QianchuanApiClient {
+         query.put("page_size", "200");
+         query.put("dimensions", json(List.of("stat_time_hour")));
+         query.put("metrics", json(List.of("stat_cost", "total_pay_order_count_for_roi2",
+-                "total_pay_order_gmv_include_coupon_for_roi2")));
++                "total_pay_order_gmv_include_coupon_for_roi2", "total_prepay_and_pay_order_roi2")));
+         query.put("filters", "[]");
+         query.put("order_by", "[{\"field\":\"stat_time_hour\",\"type\":1}]");
+         JsonNode response = get(API + "/open_api/v1.0/qianchuan/report/uni_promotion/data/get/",
+@@ -283,7 +306,7 @@ public class QianchuanApiClient {
+         requireConfigured();
+         try {
+             String jsonBody = objectMapper.writeValueAsString(body);
+-            return parseResponse(url, "POST", Map.of("Content-Type", "application/json"), jsonBody);
++            return executeWithRetry(url, "POST", Map.of("Content-Type", "application/json"), jsonBody);
+         } catch (IOException exception) {
+             throw new IllegalStateException("无法构造巨量引擎请求", exception);
+         }
+@@ -301,23 +324,42 @@ public class QianchuanApiClient {
+             query.forEach((key, value) -> values.add(encode(key) + "=" + encode(value)));
+             fullUrl.append(String.join("&", values));
+         }
+-        String requestUrl = fullUrl.toString();
+-        for (int attempt = 0; ; attempt++) {
++        return executeWithRetry(fullUrl.toString(), "GET", headers == null ? Map.of() : headers, null);
++    }
++
++    private JsonNode executeWithRetry(String requestUrl, String method, Map<String, String> headers, String body) {
++        int rateLimitAttempt = 0;
++        int transportAttempt = 0;
++        for (;;) {
+             try {
+-                return parseResponse(requestUrl, "GET", headers == null ? Map.of() : headers, null);
++                return parseResponse(requestUrl, method, headers, body);
+             } catch (QianchuanApiException exception) {
+                 if (!"被限流".equals(exception.getCategory())
+-                        || attempt >= RATE_LIMIT_RETRY_DELAYS_MILLIS.length) {
++                        || rateLimitAttempt >= RATE_LIMIT_RETRY_DELAYS_MILLIS.length) {
++                    throw exception;
++                }
++                pauseBeforeRetry(RATE_LIMIT_RETRY_DELAYS_MILLIS[rateLimitAttempt++]);
++            } catch (IllegalStateException exception) {
++                if (!isTransportFailure(exception)
++                        || transportAttempt >= TRANSPORT_RETRY_DELAYS_MILLIS.length) {
+                     throw exception;
+                 }
+-                pauseBeforeRetry(RATE_LIMIT_RETRY_DELAYS_MILLIS[attempt]);
++                long delay = TRANSPORT_RETRY_DELAYS_MILLIS[transportAttempt++];
++                log.warn("[DEBUG-clif1] transport retry seq={} attempt={} delayMs={} cause={}",
++                        requestSequence, transportAttempt, delay, rootCauseMessage(exception));
++                pauseBeforeRetry(delay);
+             }
+         }
+     }
+ 
+     private synchronized JsonNode parseResponse(String url, String method, Map<String, String> headers, String body) {
+         waitForRequestSlot();
+-        lastRequestStartedAtMillis = System.currentTimeMillis();
++        long previousStartedAt = lastRequestStartedAtMillis;
++        long startedAt = System.currentTimeMillis();
++        lastRequestStartedAtMillis = startedAt;
++        long seq = ++requestSequence;
++        long actualIntervalMs = previousStartedAt == 0 ? 0 : startedAt - previousStartedAt;
++        String path = requestPath(url);
+         HttpURLConnection connection = null;
+         try {
+             connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
+@@ -334,6 +376,7 @@ public class QianchuanApiClient {
+                 }
+             }
+             int status = connection.getResponseCode();
++            String logId = firstHeader(connection, "X-Tt-Logid", "x-tt-logid");
+             InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+             String responseBody;
+             try (Scanner scanner = new Scanner(stream == null ? InputStream.nullInputStream() : stream,
+@@ -341,10 +384,18 @@ public class QianchuanApiClient {
+                 responseBody = scanner.useDelimiter("\\A").hasNext() ? scanner.next() : "";
+             }
+             if (status < 200 || status >= 300) {
++                consecutiveTransportFailures = 0;
++                log.warn("[DEBUG-clif1] seq={} intervalMs={} method={} path={} httpStatus={} logId={} requestId=-",
++                        seq, actualIntervalMs, method, path, status, logId);
+                 throw httpException(status, responseBody);
+             }
+             JsonNode response = objectMapper.readTree(responseBody);
++            consecutiveTransportFailures = 0;
++            String requestId = response.path("request_id").asText("");
+             int code = response.path("code").asInt(-1);
++            log.warn("[DEBUG-clif1] seq={} intervalMs={} method={} path={} httpStatus={} apiCode={} logId={} requestId={}",
++                    seq, actualIntervalMs, method, path, status, code, logId,
++                    requestId.isBlank() ? "-" : requestId);
+             if (code != 0) {
+                 String message = response.path("message").asText("接口请求失败");
+                 String helpMessage = response.path("help_message").asText();
+@@ -355,6 +406,15 @@ public class QianchuanApiClient {
+             }
+             return response;
+         } catch (IOException exception) {
++            consecutiveTransportFailures++;
++            log.warn("[DEBUG-clif1] seq={} intervalMs={} method={} path={} transportFail consecutive={} cause={}",
++                    seq, actualIntervalMs, method, path, consecutiveTransportFailures, rootCauseMessage(exception));
++            if (consecutiveTransportFailures >= TRANSPORT_FAILURE_THRESHOLD) {
++                log.warn("[DEBUG-clif1] circuit open seq={} cooldownMs={} consecutive={}",
++                        seq, TRANSPORT_COOLDOWN_MILLIS, consecutiveTransportFailures);
++                pauseBeforeRetry(TRANSPORT_COOLDOWN_MILLIS);
++                consecutiveTransportFailures = 0;
++            }
+             throw new IllegalStateException("读取巨量引擎响应失败", exception);
+         } finally {
+             if (connection != null) {
+@@ -363,6 +423,43 @@ public class QianchuanApiClient {
+         }
+     }
+ 
++    static boolean isTransportFailure(IllegalStateException exception) {
++        String message = exception.getMessage();
++        if (message != null && message.contains("读取巨量引擎响应失败")) {
++            return true;
++        }
++        Throwable cause = exception.getCause();
++        return cause instanceof IOException;
++    }
++
++    private static String requestPath(String url) {
++        try {
++            var uri = URI.create(url);
++            return uri.getPath() == null ? url : uri.getPath();
++        } catch (RuntimeException ignored) {
++            return url;
++        }
++    }
++
++    private static String firstHeader(HttpURLConnection connection, String... names) {
++        for (String name : names) {
++            String value = connection.getHeaderField(name);
++            if (value != null && !value.isBlank()) {
++                return value;
++            }
++        }
++        return "-";
++    }
++
++    private static String rootCauseMessage(Throwable exception) {
++        Throwable current = exception;
++        while (current.getCause() != null && current.getCause() != current) {
++            current = current.getCause();
++        }
++        String message = current.getMessage();
++        return current.getClass().getSimpleName() + (message == null || message.isBlank() ? "" : ": " + message);
++    }
++
+     private QianchuanApiException httpException(int status, String responseBody) {
+         String message = "HTTP " + status;
+         try {
+@@ -388,6 +485,15 @@ public class QianchuanApiClient {
+         if (code == 40100) {
+             return "被限流";
+         }
++        if (code == 40102 || code == 40103 || code == 40105
++                || (normalized.contains("access_token") && (normalized.contains("invalid") || normalized.contains("expired")
++                || normalized.contains("过期") || normalized.contains("无效")))
++                || (normalized.contains("refresh_token") && (normalized.contains("invalid") || normalized.contains("expired")
++                || normalized.contains("过期") || normalized.contains("无效") || normalized.contains("撤销")))
++                || normalized.contains("授权已撤销") || normalized.contains("authorization revoked")
++                || normalized.contains("token has been revoked")) {
++            return "凭证无效";
++        }
+         if (code == 40002 || normalized.contains("无权限") || normalized.contains("permission denied")) {
+             return "无权限";
+         }
+diff --git a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanMerchantService.java b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanMerchantService.java
+index cd57907..f15b14e 100644
+--- a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanMerchantService.java
++++ b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanMerchantService.java
+@@ -34,7 +34,7 @@ public class QianchuanMerchantService {
+                 SELECT auth.advertiser_id AS merchantId, auth.merchant_name AS merchantName,
+                        auth.auth_status AS status, auth.merchant_account_type AS accountType,
+                        auth.merchant_account_role AS accountRole, auth.merchant_is_valid AS isValid,
+-                       auth.refresh_expires_at AS refreshExpiresAt,
++                       auth.refresh_expires_at AS refreshExpiresAt, auth.last_error AS lastError,
+                        (SELECT COUNT(*) FROM qianchuan_merchant_account ma
+                          JOIN qianchuan_account a ON a.advertiser_id = ma.advertiser_id
+                          WHERE ma.merchant_id = auth.advertiser_id) AS accountCount,

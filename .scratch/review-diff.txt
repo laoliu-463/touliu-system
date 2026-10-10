@@ -1,0 +1,1779 @@
+warning: in the working copy of 'smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanMerchantService.java', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'smart-admin-api-java17-springboot3/sa-admin/src/test/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanAuthorizationTest.java', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'smart-admin-web-typescript/src/api/support/operations-api.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'smart-admin-web-typescript/src/views/business/qianchuan/merchant-detail.vue', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'smart-admin-web-typescript/src/views/support/operations/overview.vue', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'smart-admin-web-typescript/src/views/system/home/components/OverviewAlertPanels.vue', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'smart-admin-web-typescript/src/views/system/home/components/OverviewTrendCharts.vue', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'smart-admin-web-typescript/src/views/system/home/components/overview-components.test.ts', LF will be replaced by CRLF the next time Git touches it
+diff --git a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/controller/QianchuanController.java b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/controller/QianchuanController.java
+index beaff72..da06be4 100644
+--- a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/controller/QianchuanController.java
++++ b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/controller/QianchuanController.java
+@@ -108,6 +108,31 @@ public class QianchuanController {
+         return ResponseDTO.ok(qianchuanService.dashboard(effectiveStart, effectiveEnd));
+     }
+ 
++    @GetMapping("/dashboard/trend")
++    @SaCheckPermission("qianchuan:dashboard")
++    @Operation(summary = "鎸夊皬鏃舵煡璇㈡姇鏀炬秷鑰椾笌鎴愪氦璧板娍")
++    public ResponseDTO<List<Map<String, Object>>> dashboardTrend(
++            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
++            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate) {
++        LocalDate yesterday = LocalDate.now().minusDays(1);
++        LocalDate effectiveEnd = endDate == null ? yesterday : endDate;
++        LocalDate effectiveStart = startDate == null ? effectiveEnd : startDate;
++        return ResponseDTO.ok(qianchuanService.dashboardTrend(effectiveStart, effectiveEnd));
++    }
++
++    @GetMapping("/sync-status")
++    @Operation(summary = "鏌ヨ鏁版嵁鍚屾鍋ュ悍鐘舵€侊紙涓夎壊鐐癸級")
++    public ResponseDTO<Map<String, Object>> syncStatus() {
++        return ResponseDTO.ok(qianchuanService.syncStatus());
++    }
++
++    @PostMapping("/sync/manual")
++    @SaCheckPermission("qianchuan:sync")
++    @Operation(summary = "绠＄悊鍛樻墜鍔ㄨЕ鍙戞姤琛ㄥ悓姝ワ紙寮傛锛?)
++    public ResponseDTO<Map<String, Object>> manualSync() {
++        return ResponseDTO.ok(qianchuanService.manualSync());
++    }
++
+     @PostMapping("/sync")
+     @SaCheckPermission("qianchuan:sync")
+     @Operation(summary = "鍚屾鍗冨窛璐︽埛鍙婂皬鏃舵姤琛?)
+diff --git a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/domain/QianchuanApiClient.java b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/domain/QianchuanApiClient.java
+index 49a3c0d..0be5f11 100644
+--- a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/domain/QianchuanApiClient.java
++++ b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/domain/QianchuanApiClient.java
+@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
+ import com.fasterxml.jackson.databind.ObjectMapper;
+ import com.fasterxml.jackson.databind.node.ArrayNode;
+ import jakarta.annotation.Resource;
++import lombok.extern.slf4j.Slf4j;
+ import org.springframework.beans.factory.annotation.Value;
+ import org.springframework.stereotype.Component;
+ 
+@@ -21,6 +22,7 @@ import java.util.List;
+ import java.util.Map;
+ import java.util.Scanner;
+ 
++@Slf4j
+ @Component
+ public class QianchuanApiClient {
+ 
+@@ -29,6 +31,11 @@ public class QianchuanApiClient {
+     private static final int API_PAGE_SIZE = 100;
+     private static final long MIN_REQUEST_INTERVAL_MILLIS = 1000;
+     private static final long[] RATE_LIMIT_RETRY_DELAYS_MILLIS = {15000, 30000, 60000, 120000};
++    /** 浼犺緭澶辫触涓嶇揣瀵嗛噸璇曪紱浠呭皯閲忛暱闂撮殧鍚庢斁寮冿紝鐢变笂灞傝处鎴峰閿欑画璺戙€?*/
++    private static final long[] TRANSPORT_RETRY_DELAYS_MILLIS = {30000, 60000};
++    /** 杩炵画浼犺緭澶辫触杈惧埌闃堝€煎悗鍐峰嵈锛岄伩鍏嶅湪瀵圭鎺愯繛鎺ユ椂缁х画鐮歌姹傘€?*/
++    private static final int TRANSPORT_FAILURE_THRESHOLD = 3;
++    private static final long TRANSPORT_COOLDOWN_MILLIS = 3 * 60 * 1000L;
+ 
+     @Value("${qianchuan.app-id:}")
+     private String appId;
+@@ -43,6 +50,8 @@ public class QianchuanApiClient {
+     private ObjectMapper objectMapper;
+ 
+     private long lastRequestStartedAtMillis;
++    private long requestSequence;
++    private int consecutiveTransportFailures;
+ 
+     public String buildAuthorizationUrl(String state) {
+         requireConfigured();
+@@ -98,6 +107,20 @@ public class QianchuanApiClient {
+         return response.path("data");
+     }
+ 
++    /**
++     * 鏌ヨ璐︽埛鏀寔鐨?uni_promotion 鎶ヨ〃 data_topic + dimensions + metrics銆?+     * 鎺ュ彛锛欸ET /open_api/v1.0/qianchuan/report/uni_promotion/config/get/
++     * 杩斿洖 data.custom_config_datas 鏁扮粍锛屾瘡椤瑰惈 data_topic / dimensions / metrics銆?+     */
++    public JsonNode reportUniPromotionConfig(String accessToken, long advertiserId) {
++        Map<String, String> query = new LinkedHashMap<>();
++        query.put("advertiser_id", String.valueOf(advertiserId));
++        query.put("data_topics", json(List.of("SITE_PROMOTION_PRODUCT_AD")));
++        JsonNode response = get(API + "/open_api/v1.0/qianchuan/report/uni_promotion/config/get/",
++                headers(accessToken), query);
++        return response.path("data").path("custom_config_datas");
++    }
++
+     public JsonNode reportByHour(String accessToken, long advertiserId, String statDate) {
+         Map<String, String> query = new LinkedHashMap<>();
+         query.put("advertiser_id", String.valueOf(advertiserId));
+@@ -108,7 +131,7 @@ public class QianchuanApiClient {
+         query.put("page_size", "200");
+         query.put("dimensions", json(List.of("stat_time_hour")));
+         query.put("metrics", json(List.of("stat_cost", "total_pay_order_count_for_roi2",
+-                "total_pay_order_gmv_include_coupon_for_roi2")));
++                "total_pay_order_gmv_include_coupon_for_roi2", "total_prepay_and_pay_order_roi2")));
+         query.put("filters", "[]");
+         query.put("order_by", "[{\"field\":\"stat_time_hour\",\"type\":1}]");
+         JsonNode response = get(API + "/open_api/v1.0/qianchuan/report/uni_promotion/data/get/",
+@@ -283,7 +306,7 @@ public class QianchuanApiClient {
+         requireConfigured();
+         try {
+             String jsonBody = objectMapper.writeValueAsString(body);
+-            return parseResponse(url, "POST", Map.of("Content-Type", "application/json"), jsonBody);
++            return executeWithRetry(url, "POST", Map.of("Content-Type", "application/json"), jsonBody);
+         } catch (IOException exception) {
+             throw new IllegalStateException("鏃犳硶鏋勯€犲法閲忓紩鎿庤姹?, exception);
+         }
+@@ -301,23 +324,42 @@ public class QianchuanApiClient {
+             query.forEach((key, value) -> values.add(encode(key) + "=" + encode(value)));
+             fullUrl.append(String.join("&", values));
+         }
+-        String requestUrl = fullUrl.toString();
+-        for (int attempt = 0; ; attempt++) {
++        return executeWithRetry(fullUrl.toString(), "GET", headers == null ? Map.of() : headers, null);
++    }
++
++    private JsonNode executeWithRetry(String requestUrl, String method, Map<String, String> headers, String body) {
++        int rateLimitAttempt = 0;
++        int transportAttempt = 0;
++        for (;;) {
+             try {
+-                return parseResponse(requestUrl, "GET", headers == null ? Map.of() : headers, null);
++                return parseResponse(requestUrl, method, headers, body);
+             } catch (QianchuanApiException exception) {
+                 if (!"琚檺娴?.equals(exception.getCategory())
+-                        || attempt >= RATE_LIMIT_RETRY_DELAYS_MILLIS.length) {
++                        || rateLimitAttempt >= RATE_LIMIT_RETRY_DELAYS_MILLIS.length) {
++                    throw exception;
++                }
++                pauseBeforeRetry(RATE_LIMIT_RETRY_DELAYS_MILLIS[rateLimitAttempt++]);
++            } catch (IllegalStateException exception) {
++                if (!isTransportFailure(exception)
++                        || transportAttempt >= TRANSPORT_RETRY_DELAYS_MILLIS.length) {
+                     throw exception;
+                 }
+-                pauseBeforeRetry(RATE_LIMIT_RETRY_DELAYS_MILLIS[attempt]);
++                long delay = TRANSPORT_RETRY_DELAYS_MILLIS[transportAttempt++];
++                log.warn("[DEBUG-clif1] transport retry seq={} attempt={} delayMs={} cause={}",
++                        requestSequence, transportAttempt, delay, rootCauseMessage(exception));
++                pauseBeforeRetry(delay);
+             }
+         }
+     }
+ 
+     private synchronized JsonNode parseResponse(String url, String method, Map<String, String> headers, String body) {
+         waitForRequestSlot();
+-        lastRequestStartedAtMillis = System.currentTimeMillis();
++        long previousStartedAt = lastRequestStartedAtMillis;
++        long startedAt = System.currentTimeMillis();
++        lastRequestStartedAtMillis = startedAt;
++        long seq = ++requestSequence;
++        long actualIntervalMs = previousStartedAt == 0 ? 0 : startedAt - previousStartedAt;
++        String path = requestPath(url);
+         HttpURLConnection connection = null;
+         try {
+             connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
+@@ -334,6 +376,7 @@ public class QianchuanApiClient {
+                 }
+             }
+             int status = connection.getResponseCode();
++            String logId = firstHeader(connection, "X-Tt-Logid", "x-tt-logid");
+             InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+             String responseBody;
+             try (Scanner scanner = new Scanner(stream == null ? InputStream.nullInputStream() : stream,
+@@ -341,10 +384,18 @@ public class QianchuanApiClient {
+                 responseBody = scanner.useDelimiter("\\A").hasNext() ? scanner.next() : "";
+             }
+             if (status < 200 || status >= 300) {
++                consecutiveTransportFailures = 0;
++                log.warn("[DEBUG-clif1] seq={} intervalMs={} method={} path={} httpStatus={} logId={} requestId=-",
++                        seq, actualIntervalMs, method, path, status, logId);
+                 throw httpException(status, responseBody);
+             }
+             JsonNode response = objectMapper.readTree(responseBody);
++            consecutiveTransportFailures = 0;
++            String requestId = response.path("request_id").asText("");
+             int code = response.path("code").asInt(-1);
++            log.warn("[DEBUG-clif1] seq={} intervalMs={} method={} path={} httpStatus={} apiCode={} logId={} requestId={}",
++                    seq, actualIntervalMs, method, path, status, code, logId,
++                    requestId.isBlank() ? "-" : requestId);
+             if (code != 0) {
+                 String message = response.path("message").asText("鎺ュ彛璇锋眰澶辫触");
+                 String helpMessage = response.path("help_message").asText();
+@@ -355,6 +406,15 @@ public class QianchuanApiClient {
+             }
+             return response;
+         } catch (IOException exception) {
++            consecutiveTransportFailures++;
++            log.warn("[DEBUG-clif1] seq={} intervalMs={} method={} path={} transportFail consecutive={} cause={}",
++                    seq, actualIntervalMs, method, path, consecutiveTransportFailures, rootCauseMessage(exception));
++            if (consecutiveTransportFailures >= TRANSPORT_FAILURE_THRESHOLD) {
++                log.warn("[DEBUG-clif1] circuit open seq={} cooldownMs={} consecutive={}",
++                        seq, TRANSPORT_COOLDOWN_MILLIS, consecutiveTransportFailures);
++                pauseBeforeRetry(TRANSPORT_COOLDOWN_MILLIS);
++                consecutiveTransportFailures = 0;
++            }
+             throw new IllegalStateException("璇诲彇宸ㄩ噺寮曟搸鍝嶅簲澶辫触", exception);
+         } finally {
+             if (connection != null) {
+@@ -363,6 +423,43 @@ public class QianchuanApiClient {
+         }
+     }
+ 
++    static boolean isTransportFailure(IllegalStateException exception) {
++        String message = exception.getMessage();
++        if (message != null && message.contains("璇诲彇宸ㄩ噺寮曟搸鍝嶅簲澶辫触")) {
++            return true;
++        }
++        Throwable cause = exception.getCause();
++        return cause instanceof IOException;
++    }
++
++    private static String requestPath(String url) {
++        try {
++            var uri = URI.create(url);
++            return uri.getPath() == null ? url : uri.getPath();
++        } catch (RuntimeException ignored) {
++            return url;
++        }
++    }
++
++    private static String firstHeader(HttpURLConnection connection, String... names) {
++        for (String name : names) {
++            String value = connection.getHeaderField(name);
++            if (value != null && !value.isBlank()) {
++                return value;
++            }
++        }
++        return "-";
++    }
++
++    private static String rootCauseMessage(Throwable exception) {
++        Throwable current = exception;
++        while (current.getCause() != null && current.getCause() != current) {
++            current = current.getCause();
++        }
++        String message = current.getMessage();
++        return current.getClass().getSimpleName() + (message == null || message.isBlank() ? "" : ": " + message);
++    }
++
+     private QianchuanApiException httpException(int status, String responseBody) {
+         String message = "HTTP " + status;
+         try {
+@@ -388,6 +485,15 @@ public class QianchuanApiClient {
+         if (code == 40100) {
+             return "琚檺娴?;
+         }
++        if (code == 40102 || code == 40103 || code == 40105
++                || (normalized.contains("access_token") && (normalized.contains("invalid") || normalized.contains("expired")
++                || normalized.contains("杩囨湡") || normalized.contains("鏃犳晥")))
++                || (normalized.contains("refresh_token") && (normalized.contains("invalid") || normalized.contains("expired")
++                || normalized.contains("杩囨湡") || normalized.contains("鏃犳晥") || normalized.contains("鎾ら攢")))
++                || normalized.contains("鎺堟潈宸叉挙閿€") || normalized.contains("authorization revoked")
++                || normalized.contains("token has been revoked")) {
++            return "鍑瘉鏃犳晥";
++        }
+         if (code == 40002 || normalized.contains("鏃犳潈闄?) || normalized.contains("permission denied")) {
+             return "鏃犳潈闄?;
+         }
+diff --git a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanMerchantService.java b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanMerchantService.java
+index cd57907..f15b14e 100644
+--- a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanMerchantService.java
++++ b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanMerchantService.java
+@@ -34,7 +34,7 @@ public class QianchuanMerchantService {
+                 SELECT auth.advertiser_id AS merchantId, auth.merchant_name AS merchantName,
+                        auth.auth_status AS status, auth.merchant_account_type AS accountType,
+                        auth.merchant_account_role AS accountRole, auth.merchant_is_valid AS isValid,
+-                       auth.refresh_expires_at AS refreshExpiresAt,
++                       auth.refresh_expires_at AS refreshExpiresAt, auth.last_error AS lastError,
+                        (SELECT COUNT(*) FROM qianchuan_merchant_account ma
+                          JOIN qianchuan_account a ON a.advertiser_id = ma.advertiser_id
+                          WHERE ma.merchant_id = auth.advertiser_id) AS accountCount,
+diff --git a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanService.java b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanService.java
+index 4ad1a2f..d42f522 100644
+--- a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanService.java
++++ b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanService.java
+@@ -8,13 +8,19 @@ import net.lab1024.sa.admin.module.business.qianchuan.domain.QianchuanApiClient;
+ import net.lab1024.sa.admin.module.business.qianchuan.domain.QianchuanApiException;
+ import net.lab1024.sa.admin.module.business.qianchuan.domain.ProductReportQueryForm;
+ import net.lab1024.sa.admin.module.business.qianchuan.domain.FeeRateForm;
++import org.springframework.dao.DataAccessException;
+ import org.springframework.beans.factory.annotation.Value;
++import org.springframework.boot.context.event.ApplicationReadyEvent;
++import org.springframework.context.event.EventListener;
+ import org.springframework.jdbc.core.JdbcTemplate;
+ import org.springframework.scheduling.annotation.Scheduled;
+ import org.springframework.stereotype.Service;
+ import org.springframework.transaction.PlatformTransactionManager;
+ import org.springframework.transaction.annotation.Transactional;
+ import org.springframework.transaction.support.TransactionTemplate;
++import org.springframework.transaction.support.TransactionSynchronization;
++import org.springframework.transaction.support.TransactionSynchronizationManager;
++import net.lab1024.sa.base.common.domain.ResponseDTO;
+ 
+ import java.math.BigDecimal;
+ import java.math.RoundingMode;
+@@ -31,6 +37,7 @@ import java.util.List;
+ import java.util.Locale;
+ import java.util.Map;
+ import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
+ 
+ @Slf4j
+ @Service
+@@ -42,6 +49,8 @@ public class QianchuanService {
+     private static final long ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60;
+     private static final long REFRESH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
+     private static final long OAUTH_STATE_TTL_MINUTES = 30;
++    /** refresh 鍓╀綑涓嶈秴杩囪澶╂暟鏃朵富鍔ㄧ画鏈燂紝閬垮厤婊氬姩绐楀彛鑰楀敖銆?*/
++    private static final long REFRESH_PROACTIVE_DAYS = 7;
+     private static final String MERCHANT_NAME_PENDING_SYNC = "寰呭悓姝ヨ瘑鍒?;
+ 
+     @Resource
+@@ -62,6 +71,26 @@ public class QianchuanService {
+     @Value("${qianchuan.redirect-uri:}")
+     private String redirectUri;
+ 
++    /**
++     * 鍚姩瀵硅处锛氭湇鍔￠噸鍚細鏉€姝绘鍦ㄦ墽琛岀殑鍚屾绾跨▼锛屼絾 sync_job 琛屽仠鐣欏湪 RUNNING 鏃犱汉鍐欏洖锛?+     * 鍙樻垚鍍靛案璁板綍銆傚簲鐢ㄥ惎鍔ㄧ灛闂翠笉鍙兘鏈夋椿璺冨悓姝ョ嚎绋嬶紝鍥犳鎶婃墍鏈?RUNNING 琛屾爣璁颁负 INTERRUPTED銆?+     */
++    @EventListener(ApplicationReadyEvent.class)
++    public void reconcileInterruptedSyncJobs() {
++        try {
++            int affected = jdbcTemplate.update("""
++                    UPDATE qianchuan_sync_job
++                       SET status = 'INTERRUPTED', end_time = ?, error_message = '鏈嶅姟閲嶅惎瀵艰嚧鍚屾涓柇锛堝惎鍔ㄥ璐︼級'
++                     WHERE status = 'RUNNING'
++                    """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI)));
++            if (affected > 0) {
++                log.warn("鍚姩瀵硅处锛氭竻鐞?{} 鏉″洜鏈嶅姟閲嶅惎閬楃暀鐨?RUNNING 鍚屾璁板綍涓?INTERRUPTED", affected);
++            }
++        } catch (DataAccessException e) {
++            log.error("鍚姩瀵硅处娓呯悊 RUNNING 鍚屾璁板綍澶辫触", e);
++        }
++    }
++
+     public Map<String, Object> startAuthorization(String merchantName) {
+         String state = UUID.randomUUID().toString().replace("-", "");
+         String initialMerchantName = merchantName == null || merchantName.isBlank()
+@@ -128,6 +157,19 @@ public class QianchuanService {
+                 merchantIdentity == null ? null : QianchuanApiClient.text(merchantIdentity, "account_role"),
+                 merchantIdentity == null ? null : merchantIdentity.path("is_valid").asBoolean(true), state);
+ 
++        // 鎺堟潈鍐欏叆鎻愪氦鍚庡紓姝ヨЕ鍙戦娆″悓姝ワ細鍙戠幇璐︽埛 + 鎷夊綋澶╂姤琛紝涓嶉樆濉炲洖璋冨搷搴斻€?+        final String syncedState = state;
++        if (TransactionSynchronizationManager.isSynchronizationActive()) {
++            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
++                @Override
++                public void afterCommit() {
++                    CompletableFuture.runAsync(() -> autoSyncNewMerchant(syncedState));
++                }
++            });
++        } else {
++            CompletableFuture.runAsync(() -> autoSyncNewMerchant(syncedState));
++        }
++
+         Map<String, Object> result = new LinkedHashMap<>();
+         result.put("merchantName", merchantName);
+         result.put("lastError", nameError);
+@@ -144,6 +186,19 @@ public class QianchuanService {
+                 + "<p>鎺堟潈鍑瘉宸茬敱鏈嶅姟绔繚瀛樸€?/p><p>璇疯繑鍥炵鐞嗙郴缁熸煡鐪嬪晢瀹跺悕绉板拰鎺堟潈鐘舵€併€?/p></body></html>";
+     }
+ 
++    /**
++     * 鏂版巿鏉冨悗鑷姩鍚屾锛氬彂鐜拌处鎴?+ 鎷夊綋澶╂姤琛ㄣ€傚け璐ュ彧璁版棩蹇楋紝涓嶅奖鍝嶆巿鏉冩祦绋嬨€?+     */
++    private void autoSyncNewMerchant(String state) {
++        try {
++            syncAccounts(state);
++            LocalDate today = LocalDate.now(SHANGHAI);
++            syncReportOnly(today, today);
++        } catch (Exception e) {
++            log.warn("鏂版巿鏉冭嚜鍔ㄥ悓姝ュけ璐?state={} error={}", state, e.getMessage());
++        }
++    }
++
+     public List<Map<String, Object>> listAuthorizations() {
+         return jdbcTemplate.queryForList("""
+                 SELECT state, merchant_name AS merchantName, advertiser_id AS advertiserId,
+@@ -208,6 +263,21 @@ public class QianchuanService {
+         return result;
+     }
+ 
++    public List<Map<String, Object>> dashboardTrend(LocalDate startDate, LocalDate endDate) {
++        return jdbcTemplate.queryForList("""
++                SELECT stat_time_hour AS time,
++                       COALESCE(SUM(stat_cost), 0) AS spend,
++                       COALESCE(SUM(pay_order_gmv), 0) AS gmv
++                  FROM qianchuan_report_hour
++                 WHERE stat_time_hour >= ? AND stat_time_hour < ?
++                 GROUP BY stat_time_hour
++                 ORDER BY stat_time_hour
++                """, Timestamp.valueOf(startDate.atStartOfDay()), Timestamp.valueOf(endDate.plusDays(1).atStartOfDay()));
++    }
++
++    /**
++     * 缁勫悎鍚屾锛氳处鎴峰彂鐜?+ 鎶ヨ〃鎷夊彇銆備繚鐣欑粰鏃ф帴鍙?/qianchuan/sync 鍜岃繍缁撮潰鏉裤€岀珛鍗抽噸璺戙€嶃€?+     */
+     public synchronized Map<String, Object> sync(LocalDate startDate, LocalDate endDate) {
+         validateDateRange(startDate, endDate, 30);
+ 
+@@ -217,25 +287,47 @@ public class QianchuanService {
+         Long jobId = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
+         int accountsSynced = 0;
+         int rowsSynced = 0;
++        int accountsFailed = 0;
++        List<String> failedDetails = new ArrayList<>();
+ 
+         try {
+             List<Map<String, Object>> authorizations = jdbcTemplate.queryForList(
+                     "SELECT state FROM qianchuan_authorization WHERE auth_status = 'AUTHORIZED' ORDER BY id");
+             for (Map<String, Object> authorization : authorizations) {
+                 String state = String.valueOf(authorization.get("state"));
+-                List<Long> advertiserIds = syncAccounts(state);
+-                accountsSynced += advertiserIds.size();
+-                String accessToken = getValidAccessToken(state);
+-                for (Long advertiserId : advertiserIds) {
+-                    rowsSynced += syncReports(accessToken, advertiserId, startDate, endDate);
++                List<Long> advertiserIds;
++                String accessToken;
++                try {
++                    advertiserIds = syncAccounts(state);
++                    accessToken = getValidAccessToken(state);
++                } catch (RuntimeException authError) {
++                    accountsFailed++;
++                    String msg = safeError(authError.getMessage());
++                    failedDetails.add("auth:" + state + ": " + msg);
++                    log.warn("鍚屾鎶ヨ〃鎺堟潈绾уけ璐ュ凡璺宠繃 state={} error={}", state, msg);
++                    continue;
+                 }
++                int[] result = syncReportsForAccounts(accessToken, advertiserIds, startDate, endDate, failedDetails);
++                accountsSynced += result[0];
++                rowsSynced += result[1];
++                accountsFailed += result[2];
+             }
++            String status = failedDetails.isEmpty() ? "SUCCESS" : "PARTIAL";
++            String errorSummary = failedDetails.isEmpty() ? null
++                    : accountsFailed + " 涓处鎴峰け璐? " + String.join("; ", failedDetails.subList(0, Math.min(5, failedDetails.size())));
+             jdbcTemplate.update("""
+-                    UPDATE qianchuan_sync_job SET end_time = ?, account_count = ?, row_count = ?, status = 'SUCCESS'
++                    UPDATE qianchuan_sync_job SET end_time = ?, account_count = ?, row_count = ?, status = ?, error_message = ?
+                      WHERE id = ?
+-                    """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI)), accountsSynced, rowsSynced, jobId);
+-            return Map.of("jobId", jobId, "accountCount", accountsSynced, "rowCount", rowsSynced,
+-                    "startDate", startDate.toString(), "endDate", endDate.toString(), "status", "SUCCESS");
++                    """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI)), accountsSynced, rowsSynced, status, errorSummary, jobId);
++            Map<String, Object> result = new LinkedHashMap<>();
++            result.put("jobId", jobId);
++            result.put("accountCount", accountsSynced);
++            result.put("rowCount", rowsSynced);
++            result.put("accountsFailed", accountsFailed);
++            result.put("startDate", startDate.toString());
++            result.put("endDate", endDate.toString());
++            result.put("status", status);
++            return result;
+         } catch (RuntimeException exception) {
+             String error = safeError(exception.getMessage());
+             jdbcTemplate.update("""
+@@ -246,6 +338,175 @@ public class QianchuanService {
+         }
+     }
+ 
++    /**
++     * 绾姤琛ㄥ悓姝ワ細浠庢湰鍦?DB 璇诲彇宸叉湁璐︽埛鍒楄〃锛屾寜鎺堟潈鍒嗙粍鎷夊彇鎶ヨ〃銆備笉鍋氳处鎴峰彂鐜般€?+     * 渚?QianchuanSyncScheduler 瀹氭椂璋冪敤銆?+     */
++    public synchronized Map<String, Object> syncReportOnly(LocalDate startDate, LocalDate endDate) {
++        validateDateRange(startDate, endDate, 30);
++        LocalDateTime startedAt = LocalDateTime.now(SHANGHAI);
++        jdbcTemplate.update("INSERT INTO qianchuan_sync_job (sync_type, start_time, status) VALUES ('REPORT', ?, 'RUNNING')",
++                Timestamp.valueOf(startedAt));
++        Long jobId = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
++        return executeReportSyncBody(jobId, startDate, endDate);
++    }
++
++    /**
++     * 杩愮淮闈㈡澘銆岀珛鍗抽噸璺戙€嶃€傛鏌ュ苟鍙?鈫?鍒涘缓 MANUAL job 鈫?寮傛鎵ц 鈫?绔嬪嵆杩斿洖 jobId銆?+     */
++    public Map<String, Object> manualSync() {
++        Integer running = jdbcTemplate.queryForObject(
++                "SELECT COUNT(*) FROM qianchuan_sync_job WHERE sync_type IN ('REPORT','MANUAL') AND status = 'RUNNING'",
++                Integer.class);
++        if (running != null && running > 0) {
++            throw new IllegalArgumentException("鍚屾杩涜涓紝璇风◢鍚庡啀璇?);
++        }
++        LocalDate today = LocalDate.now(SHANGHAI);
++        LocalDateTime startedAt = LocalDateTime.now(SHANGHAI);
++        jdbcTemplate.update("INSERT INTO qianchuan_sync_job (sync_type, start_time, status) VALUES ('MANUAL', ?, 'RUNNING')",
++                Timestamp.valueOf(startedAt));
++        Long jobId = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
++        CompletableFuture.runAsync(() -> {
++            try {
++                syncReportOnlyWithJobId(jobId, today, today);
++            } catch (Exception e) {
++                log.error("[ManualSync] jobId={} 寮傛鎵ц寮傚父", jobId, e);
++            }
++        });
++        Map<String, Object> result = new LinkedHashMap<>();
++        result.put("jobId", jobId);
++        result.put("status", "RUNNING");
++        return result;
++    }
++
++    private synchronized void syncReportOnlyWithJobId(Long jobId, LocalDate startDate, LocalDate endDate) {
++        executeReportSyncBody(jobId, startDate, endDate);
++    }
++
++    /**
++     * 鎶ヨ〃鍚屾鏍稿績閫昏緫锛堝亣瀹?job 璁板綍宸插垱寤轰负 RUNNING锛夈€?+     */
++    private Map<String, Object> executeReportSyncBody(Long jobId, LocalDate startDate, LocalDate endDate) {
++        int accountsSynced = 0;
++        int rowsSynced = 0;
++        int accountsFailed = 0;
++        List<String> failedDetails = new ArrayList<>();
++        try {
++            List<Map<String, Object>> authorizations = jdbcTemplate.queryForList(
++                    "SELECT state FROM qianchuan_authorization WHERE auth_status = 'AUTHORIZED' ORDER BY id");
++            for (Map<String, Object> authorization : authorizations) {
++                String state = String.valueOf(authorization.get("state"));
++                String accessToken;
++                List<Long> advertiserIds;
++                try {
++                    accessToken = getValidAccessToken(state);
++                    advertiserIds = jdbcTemplate.queryForList(
++                            "SELECT advertiser_id FROM qianchuan_account WHERE state = ? AND (topic_supported IS NULL OR topic_supported = 'YES')",
++                            Long.class, state);
++                } catch (RuntimeException authError) {
++                    accountsFailed++;
++                    String msg = safeError(authError.getMessage());
++                    failedDetails.add("auth:" + state + ": " + msg);
++                    log.warn("绾姤琛ㄥ悓姝ユ巿鏉冪骇澶辫触宸茶烦杩?state={} error={}", state, msg);
++                    continue;
++                }
++                int[] result = syncReportsForAccounts(accessToken, advertiserIds, startDate, endDate, failedDetails);
++                accountsSynced += result[0];
++                rowsSynced += result[1];
++                accountsFailed += result[2];
++            }
++            String status = failedDetails.isEmpty() ? "SUCCESS" : "PARTIAL";
++            String errorSummary = failedDetails.isEmpty() ? null
++                    : accountsFailed + " 涓处鎴峰け璐? " + String.join("; ", failedDetails.subList(0, Math.min(5, failedDetails.size())));
++            jdbcTemplate.update("""
++                    UPDATE qianchuan_sync_job SET end_time = ?, account_count = ?, row_count = ?, status = ?, error_message = ?
++                     WHERE id = ?
++                    """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI)), accountsSynced, rowsSynced, status, errorSummary, jobId);
++            Map<String, Object> result = new LinkedHashMap<>();
++            result.put("jobId", jobId);
++            result.put("accountCount", accountsSynced);
++            result.put("rowCount", rowsSynced);
++            result.put("accountsFailed", accountsFailed);
++            result.put("startDate", startDate.toString());
++            result.put("endDate", endDate.toString());
++            result.put("status", status);
++            return result;
++        } catch (RuntimeException exception) {
++            String error = safeError(exception.getMessage());
++            jdbcTemplate.update("""
++                    UPDATE qianchuan_sync_job SET end_time = ?, account_count = ?, row_count = ?,
++                           status = 'FAILED', error_message = ? WHERE id = ?
++                    """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI)), accountsSynced, rowsSynced, error, jobId);
++            throw exception;
++        }
++    }
++
++    /**
++     * 瀵逛竴缁?advertiserId 鎷夊彇鎶ヨ〃锛岃繑鍥?[accountsSynced, rowsSynced, accountsFailed]銆?+     * 鍗曡处鎴峰け璐ヨ褰曞埌 failedDetails 骞惰烦杩囷紝涓嶄腑鏂悗缁处鎴枫€?+     */
++    private int[] syncReportsForAccounts(String accessToken, List<Long> advertiserIds,
++                                         LocalDate startDate, LocalDate endDate, List<String> failedDetails) {
++        int accountsSynced = 0;
++        int rowsSynced = 0;
++        int accountsFailed = 0;
++        for (Long advertiserId : advertiserIds) {
++            try {
++                if (!isTopicSupported(accessToken, advertiserId)) {
++                    accountsSynced++;
++                    continue;
++                }
++                rowsSynced += syncReports(accessToken, advertiserId, startDate, endDate);
++                accountsSynced++;
++            } catch (RuntimeException accountError) {
++                accountsFailed++;
++                accountsSynced++;
++                String msg = safeError(accountError.getMessage());
++                failedDetails.add(advertiserId + ": " + msg);
++                log.warn("鍚屾鎶ヨ〃鍗曡处鎴峰け璐ュ凡璺宠繃 advertiserId={} error={}", advertiserId, msg);
++            }
++        }
++        return new int[]{accountsSynced, rowsSynced, accountsFailed};
++    }
++
++    /**
++     * 鎺㈡祴璐︽埛鏄惁鏀寔 SITE_PROMOTION_PRODUCT_AD 鎶ヨ〃涓婚銆?+     * 涓嶆敮鎸佺殑璐︽埛璺宠繃鎷夊彇锛岄伩鍏?400153 閿欒銆?+     * 缁撴灉缂撳瓨鍒?qianchuan_account 琛ㄧ殑 topic_supported 鍒楋紙棣栨鏌ヨ鏃?NULL=鏈帰娴嬶級銆?+     */
++    private boolean isTopicSupported(String accessToken, long advertiserId) {
++        // 鏌ョ紦瀛?+        List<Map<String, Object>> cached = jdbcTemplate.queryForList(
++                "SELECT topic_supported FROM qianchuan_account WHERE advertiser_id = ?", advertiserId);
++        if (!cached.isEmpty() && cached.get(0).get("topic_supported") != null) {
++            return "YES".equals(String.valueOf(cached.get(0).get("topic_supported")));
++        }
++        try {
++            JsonNode configs = apiClient.reportUniPromotionConfig(accessToken, advertiserId);
++            boolean supported = false;
++            if (configs.isArray()) {
++                for (JsonNode config : configs) {
++                    String topic = QianchuanApiClient.text(config, "data_topic", "value");
++                    if (topic == null) topic = QianchuanApiClient.text(config, "data_topic");
++                    if (DATA_TOPIC.equals(topic)) {
++                        supported = true;
++                        break;
++                    }
++                }
++            }
++            jdbcTemplate.update("UPDATE qianchuan_account SET topic_supported = ? WHERE advertiser_id = ?",
++                    supported ? "YES" : "NO", advertiserId);
++            if (!supported) {
++                log.info("璐︽埛涓嶆敮鎸?{} 涓婚锛岃烦杩?advertiserId={}", DATA_TOPIC, advertiserId);
++            }
++            return supported;
++        } catch (RuntimeException e) {
++            log.warn("鎺㈡祴鎶ヨ〃閰嶇疆澶辫触 advertiserId={} error={}", advertiserId, safeError(e.getMessage()));
++            // 鎺㈡祴澶辫触鏃朵粛灏濊瘯鎷夊彇锛堜繚瀹堢瓥鐣ワ級
++            return true;
++        }
++    }
++
+     public synchronized Map<String, Object> syncCatalog(LocalDate startDate, LocalDate endDate) {
+         validateDateRange(startDate, endDate, 30);
+ 
+@@ -259,27 +520,39 @@ public class QianchuanService {
+                     "SELECT state FROM qianchuan_authorization WHERE auth_status = 'AUTHORIZED' ORDER BY id");
+             for (Map<String, Object> authorization : authorizations) {
+                 String state = String.valueOf(authorization.get("state"));
+-                List<Long> advertiserIds = syncAccounts(state);
+-                String accessToken = getValidAccessToken(state);
++                List<Long> advertiserIds;
++                String accessToken;
++                try {
++                    advertiserIds = syncAccounts(state);
++                    accessToken = getValidAccessToken(state);
++                } catch (RuntimeException authError) {
++                    log.warn("鍚屾涓氬姟鏁版嵁鎺堟潈绾уけ璐ュ凡璺宠繃 state={} error={}", state, safeError(authError.getMessage()));
++                    continue;
++                }
+                 for (Long advertiserId : advertiserIds) {
+-                    syncAccountBalance(accessToken, advertiserId);
+                     try {
+-                        products += syncProducts(accessToken, advertiserId);
+-                    } catch (QianchuanApiException exception) {
+-                        if (exception.getMessage() == null
+-                                || !exception.getMessage().contains("浠呮敮鎸佸晢瀹惰鑹插鎴疯皟鐢ㄨ鎺ュ彛")) {
+-                            throw exception;
++                        syncAccountBalance(accessToken, advertiserId);
++                        try {
++                            products += syncProducts(accessToken, advertiserId);
++                        } catch (QianchuanApiException exception) {
++                            if (exception.getMessage() == null
++                                    || !exception.getMessage().contains("浠呮敮鎸佸晢瀹惰鑹插鎴疯皟鐢ㄨ鎺ュ彛")) {
++                                throw exception;
++                            }
++                            log.info("鍗冨窛杈句汉璐︽埛涓嶆敮鎸佸晢瀹跺晢鍝佸垪琛ㄦ帴鍙ｏ紝缁х画鍚屾璁″垝鍜岀礌鏉? advertiserId={}", advertiserId);
+                         }
+-                        log.info("鍗冨窛杈句汉璐︽埛涓嶆敮鎸佸晢瀹跺晢鍝佸垪琛ㄦ帴鍙ｏ紝缁х画鍚屾璁″垝鍜岀礌鏉? advertiserId={}", advertiserId);
+-                    }
+-                    List<Long> accountPlans = syncPlans(accessToken, advertiserId, startDate, endDate);
+-                    plans += accountPlans.size();
+-                    for (Long adId : accountPlans) {
+-                        materials += syncMaterials(accessToken, advertiserId, adId);
++                        List<Long> accountPlans = syncPlans(accessToken, advertiserId, startDate, endDate);
++                        plans += accountPlans.size();
++                        for (Long adId : accountPlans) {
++                            materials += syncMaterials(accessToken, advertiserId, adId);
++                            pauseForRateLimit();
++                        }
++                        accounts++;
+                         pauseForRateLimit();
++                    } catch (RuntimeException accountError) {
++                        log.warn("鍚屾涓氬姟鏁版嵁鍗曡处鎴峰け璐ュ凡璺宠繃 advertiserId={} error={}",
++                                advertiserId, safeError(accountError.getMessage()));
+                     }
+-                    accounts++;
+-                    pauseForRateLimit();
+                 }
+             }
+             finishSyncJob(jobId, accounts, plans + products + materials, null);
+@@ -820,8 +1093,16 @@ public class QianchuanService {
+                     "SELECT state FROM qianchuan_authorization WHERE auth_status = 'AUTHORIZED' ORDER BY id");
+             for (Map<String, Object> authorization : authorizations) {
+                 String state = String.valueOf(authorization.get("state"));
+-                String token = getValidAccessToken(state);
+-                for (Long advertiserId : syncAccounts(state)) {
++                String token;
++                List<Long> advertiserIds;
++                try {
++                    token = getValidAccessToken(state);
++                    advertiserIds = syncAccounts(state);
++                } catch (RuntimeException authError) {
++                    log.warn("鍚屾璇勮鎺堟潈绾уけ璐ュ凡璺宠繃 state={} error={}", state, safeError(authError.getMessage()));
++                    continue;
++                }
++                for (Long advertiserId : advertiserIds) {
+                     for (int page = 1; page <= 100; page++) {
+                         JsonNode rows = apiClient.commentList(token, advertiserId, startDate.toString(), endDate.toString(), page);
+                         if (!rows.isArray() || rows.isEmpty()) break;
+@@ -1097,6 +1378,59 @@ public class QianchuanService {
+         catch (Exception ignored) { return null; }
+     }
+ 
++    /**
++     * 鏌ヨ鏁版嵁鍚屾鍋ュ悍鐘舵€侊紙涓夎壊鐐?+ 鏁版嵁鎴嚦鏃堕棿锛夈€?+     */
++    public Map<String, Object> syncStatus() {
++        // 1. 鏈€鏂版垚鍔熺殑 REPORT/MANUAL job 鐨?end_time
++        List<Map<String, Object>> latestJobs = jdbcTemplate.queryForList("""
++                SELECT end_time FROM qianchuan_sync_job
++                 WHERE sync_type IN ('REPORT', 'MANUAL') AND status IN ('SUCCESS', 'PARTIAL')
++                 ORDER BY end_time DESC LIMIT 1
++                """);
++        LocalDateTime lastSuccessAt = null;
++        if (!latestJobs.isEmpty() && latestJobs.get(0).get("end_time") != null) {
++            Object raw = latestJobs.get(0).get("end_time");
++            lastSuccessAt = raw instanceof java.sql.Timestamp ts ? ts.toLocalDateTime() : null;
++        }
++
++        // 2. 浠婃棩 coverage 琛ㄦ垚鍔熺巼
++        LocalDate today = LocalDate.now(SHANGHAI);
++        Map<String, Object> coverage = jdbcTemplate.queryForMap("""
++                SELECT COUNT(*) AS total,
++                       SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS successCount,
++                       SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failedCount
++                  FROM qianchuan_report_sync_coverage WHERE stat_date = ?
++                """, Date.valueOf(today));
++        long totalCov = ((Number) coverage.getOrDefault("total", 0)).longValue();
++        long successCov = ((Number) coverage.getOrDefault("successCount", 0)).longValue();
++        long failedCov = ((Number) coverage.getOrDefault("failedCount", 0)).longValue();
++        double rate = totalCov == 0 ? 0 : (double) successCov / totalCov;
++
++        // 3. 鍒ゅ畾棰滆壊
++        String color;
++        LocalDateTime now = LocalDateTime.now(SHANGHAI);
++        if (lastSuccessAt == null) {
++            color = "RED";
++        } else {
++            long minutesSince = java.time.Duration.between(lastSuccessAt, now).toMinutes();
++            if (minutesSince <= 120 && rate >= 0.9) {
++                color = "GREEN";
++            } else if (minutesSince <= 720 && rate >= 0.7) {
++                color = "YELLOW";
++            } else {
++                color = "RED";
++            }
++        }
++
++        Map<String, Object> result = new LinkedHashMap<>();
++        result.put("color", color);
++        result.put("lastSuccessAt", lastSuccessAt);
++        result.put("todayCoverageRate", Math.round(rate * 100) / 100.0);
++        result.put("todayFailedAccounts", failedCov);
++        return result;
++    }
++
+     public List<Map<String, Object>> listSyncJobs(int limit) {
+         return jdbcTemplate.queryForList("""
+                 SELECT id, sync_type AS syncType, start_time AS startTime, end_time AS endTime,
+@@ -1128,29 +1462,23 @@ public class QianchuanService {
+                 error == null ? "SUCCESS" : "FAILED", error, jobId);
+     }
+ 
+-    @Scheduled(cron = "0 20 9 * * ?", zone = "Asia/Shanghai")
++    /**
++     * @deprecated 宸茬敱 QianchuanSyncScheduler.scheduledReport() 鍙栦唬锛堟瘡30鍒嗛挓鑷姩鎷夊彇锛夈€?+     */
++    @Deprecated
+     public void syncPreviousDay() {
+-        Integer authorizedCount = jdbcTemplate.queryForObject(
+-                "SELECT COUNT(*) FROM qianchuan_authorization WHERE auth_status = 'AUTHORIZED'", Integer.class);
+-        if (authorizedCount == null || authorizedCount == 0) {
+-            return;
+-        }
+-        LocalDate yesterday = LocalDate.now(SHANGHAI).minusDays(1);
+-        try {
+-            sync(yesterday, yesterday);
+-        } catch (Exception exception) {
+-            log.error("鍗冨窛鏄ㄦ棩鏁版嵁鑷姩鍚屾澶辫触", exception);
+-        }
++        // 淇濈暀鏂规硶绛惧悕閬垮厤缂栬瘧鎶ラ敊锛屽疄闄呴€昏緫鐢辫皟搴﹀櫒鎵ц
+     }
+ 
+     @Scheduled(fixedDelay = 600000, initialDelay = 60000)
+     public void refreshExpiringTokens() {
++        LocalDateTime now = LocalDateTime.now(SHANGHAI);
+         List<Map<String, Object>> expiring = jdbcTemplate.queryForList("""
+                 SELECT state FROM qianchuan_authorization
+                  WHERE auth_status = 'AUTHORIZED'
+                    AND (access_expires_at <= ? OR refresh_expires_at <= ?)
+-                """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI).plusHours(1)),
+-                Timestamp.valueOf(LocalDateTime.now(SHANGHAI)));
++                """, Timestamp.valueOf(now.plusHours(1)),
++                Timestamp.valueOf(now.plusDays(REFRESH_PROACTIVE_DAYS)));
+         for (Map<String, Object> item : expiring) {
+             String state = String.valueOf(item.get("state"));
+             try {
+@@ -1161,7 +1489,7 @@ public class QianchuanService {
+         }
+     }
+ 
+-    private List<Long> syncAccounts(String state) {
++    public List<Long> syncAccounts(String state) {
+         String accessToken = getValidAccessToken(state);
+         JsonNode authorizedRows = apiClient.listAuthorizedAdvertisers(accessToken);
+         Map<String, Object> authorizationIdentity = jdbcTemplate.queryForMap(
+@@ -1551,14 +1879,16 @@ public class QianchuanService {
+                 "SELECT access_token, refresh_token, access_expires_at, refresh_expires_at FROM qianchuan_authorization WHERE state = ? AND auth_status = 'AUTHORIZED'", state);
+         LocalDateTime now = LocalDateTime.now(SHANGHAI);
+         LocalDateTime accessExpiry = nullableDatabaseDateTime(authorization.get("access_expires_at"));
+-        if (accessExpiry != null && accessExpiry.isAfter(now.plusHours(1))) {
+-            return String.valueOf(authorization.get("access_token"));
+-        }
+         LocalDateTime refreshExpiry = nullableDatabaseDateTime(authorization.get("refresh_expires_at"));
+         if (refreshExpiry == null || !refreshExpiry.isAfter(now)) {
+             markReauthorizationRequired(state, "鍒锋柊鍑瘉宸茶繃鏈燂紝璇烽噸鏂版巿鏉?);
+             throw new IllegalStateException("鎺堟潈宸茶繃鏈燂紝璇烽噸鏂板彂璧峰晢瀹舵巿鏉?);
+         }
++        boolean accessFresh = accessExpiry != null && accessExpiry.isAfter(now.plusHours(1));
++        boolean refreshNearExpiry = !refreshExpiry.isAfter(now.plusDays(REFRESH_PROACTIVE_DAYS));
++        if (accessFresh && !refreshNearExpiry) {
++            return String.valueOf(authorization.get("access_token"));
++        }
+ 
+         try {
+             JsonNode data = apiClient.data(apiClient.refreshToken(String.valueOf(authorization.get("refresh_token"))));
+@@ -1575,7 +1905,11 @@ public class QianchuanService {
+             return accessToken;
+         } catch (RuntimeException exception) {
+             String message = safeError(exception.getMessage());
+-            jdbcTemplate.update("UPDATE qianchuan_authorization SET last_error = ? WHERE state = ?", message, state);
++            if (isRefreshCredentialInvalid(exception)) {
++                markReauthorizationRequired(state, "鍒锋柊鍑瘉宸插け鏁堬紝璇烽噸鏂版巿鏉?);
++            } else {
++                jdbcTemplate.update("UPDATE qianchuan_authorization SET last_error = ? WHERE state = ?", message, state);
++            }
+             throw exception;
+         }
+     }
+@@ -1585,6 +1919,43 @@ public class QianchuanService {
+                 reason, state);
+     }
+ 
++    /** 骞冲彴鏄庣‘琛ㄧず refresh/access 鏃犳晥鎴栧凡鎾ら攢鏃讹紝绔嬪埢瑕佹眰鍟嗗閲嶆柊鎺堟潈銆?*/
++    static boolean isRefreshCredentialInvalid(Throwable exception) {
++        Throwable current = exception;
++        while (current != null) {
++            if (current instanceof QianchuanApiException apiException) {
++                if ("鍑瘉鏃犳晥".equals(apiException.getCategory())) {
++                    return true;
++                }
++                String apiCode = apiException.getApiCode();
++                if ("40102".equals(apiCode) || "40103".equals(apiCode) || "40105".equals(apiCode)
++                        || "HTTP_401".equals(apiCode)) {
++                    return true;
++                }
++            }
++            String message = current.getMessage();
++            if (message != null) {
++                String normalized = message.toLowerCase(Locale.ROOT);
++                if (normalized.contains("refresh_token") && (normalized.contains("invalid")
++                        || normalized.contains("expired") || normalized.contains("杩囨湡")
++                        || normalized.contains("鏃犳晥") || normalized.contains("鎾ら攢"))) {
++                    return true;
++                }
++                if (normalized.contains("access_token") && (normalized.contains("invalid")
++                        || normalized.contains("expired") || normalized.contains("杩囨湡")
++                        || normalized.contains("鏃犳晥"))) {
++                    return true;
++                }
++                if (normalized.contains("鎺堟潈宸叉挙閿€") || normalized.contains("authorization revoked")
++                        || normalized.contains("token has been revoked")) {
++                    return true;
++                }
++            }
++            current = current.getCause();
++        }
++        return false;
++    }
++
+     private static LocalDateTime parseStatHour(String value) {
+         String normalized = value.replace('T', ' ');
+         if (normalized.length() == 16) {
+diff --git a/smart-admin-api-java17-springboot3/sa-admin/src/test/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanAuthorizationTest.java b/smart-admin-api-java17-springboot3/sa-admin/src/test/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanAuthorizationTest.java
+index 4c3bb21..0514663 100644
+--- a/smart-admin-api-java17-springboot3/sa-admin/src/test/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanAuthorizationTest.java
++++ b/smart-admin-api-java17-springboot3/sa-admin/src/test/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanAuthorizationTest.java
+@@ -84,7 +84,8 @@ class QianchuanAuthorizationTest {
+     void laterAccountSyncKeepsTheAuthorizedMerchantIdentity() throws Exception {
+         when(jdbc.queryForMap(contains("access_token"), eq("new-state"))).thenReturn(Map.of(
+                 "access_token", "test-access", "refresh_token", "test-refresh",
+-                "access_expires_at", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).plusHours(24)));
++                "access_expires_at", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).plusHours(24),
++                "refresh_expires_at", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).plusDays(30)));
+         when(jdbc.queryForMap(startsWith("SELECT advertiser_id, merchant_name"), eq("new-state")))
+                 .thenReturn(Map.of("merchant_name", "鐕冩槦浼犲獟"));
+         when(api.listAuthorizedAdvertisers("test-access")).thenReturn(mapper.readTree("""
+@@ -102,4 +103,62 @@ class QianchuanAuthorizationTest {
+         verify(jdbc, never()).update(startsWith("UPDATE qianchuan_authorization SET merchant_name"),
+                 eq("鍏朵粬鍝佺墝"), eq("new-state"));
+     }
++
++    @Test
++    void refreshNearExpiryForcesTokenRefreshEvenWhenAccessStillFresh() throws Exception {
++        when(jdbc.queryForMap(contains("access_token"), eq("new-state"))).thenReturn(Map.of(
++                "access_token", "old-access", "refresh_token", "old-refresh",
++                "access_expires_at", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).plusHours(12),
++                "refresh_expires_at", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).plusDays(3)));
++        var refreshed = mapper.readTree("""
++                {"access_token":"new-access","refresh_token":"new-refresh",
++                 "expires_in":86400,"refresh_token_expires_in":2592000}
++                """);
++        when(api.refreshToken("old-refresh")).thenReturn(refreshed);
++        when(api.data(refreshed)).thenReturn(refreshed);
++
++        String token = ReflectionTestUtils.invokeMethod(service, "getValidAccessToken", "new-state");
++        assertEquals("new-access", token);
++        verify(api).refreshToken("old-refresh");
++    }
++
++    @Test
++    void invalidRefreshCredentialMarksReauthorizationRequired() {
++        when(jdbc.queryForMap(contains("access_token"), eq("new-state"))).thenReturn(Map.of(
++                "access_token", "old-access", "refresh_token", "dead-refresh",
++                "access_expires_at", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).plusMinutes(10),
++                "refresh_expires_at", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).plusDays(10)));
++        when(api.refreshToken("dead-refresh")).thenThrow(
++                new net.lab1024.sa.admin.module.business.qianchuan.domain.QianchuanApiException(
++                        "鍑瘉鏃犳晥", "40103", "refresh_token is invalid or expired"));
++
++        assertThrows(RuntimeException.class,
++                () -> ReflectionTestUtils.invokeMethod(service, "getValidAccessToken", "new-state"));
++        verify(jdbc).update(startsWith("UPDATE qianchuan_authorization SET auth_status = 'REAUTH_REQUIRED'"),
++                anyString(), eq("new-state"));
++    }
++
++    @Test
++    void transientRefreshFailureKeepsAuthorizedAndRecordsError() {
++        when(jdbc.queryForMap(contains("access_token"), eq("new-state"))).thenReturn(Map.of(
++                "access_token", "old-access", "refresh_token", "old-refresh",
++                "access_expires_at", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).plusMinutes(10),
++                "refresh_expires_at", LocalDateTime.now(ZoneId.of("Asia/Shanghai")).plusDays(10)));
++        when(api.refreshToken("old-refresh")).thenThrow(new IllegalStateException("璇诲彇宸ㄩ噺寮曟搸鍝嶅簲澶辫触"));
++
++        assertThrows(RuntimeException.class,
++                () -> ReflectionTestUtils.invokeMethod(service, "getValidAccessToken", "new-state"));
++        verify(jdbc).update(eq("UPDATE qianchuan_authorization SET last_error = ? WHERE state = ?"),
++                anyString(), eq("new-state"));
++        verify(jdbc, never()).update(startsWith("UPDATE qianchuan_authorization SET auth_status = 'REAUTH_REQUIRED'"),
++                any(), any());
++    }
++
++    @Test
++    void isRefreshCredentialInvalidDetectsRevokedTokenMessages() {
++        assertTrue(QianchuanService.isRefreshCredentialInvalid(
++                new IllegalStateException("authorization revoked by user")));
++        assertFalse(QianchuanService.isRefreshCredentialInvalid(
++                new IllegalStateException("璇诲彇宸ㄩ噺寮曟搸鍝嶅簲澶辫触")));
++    }
+ }
+diff --git a/smart-admin-web-typescript/src/api/business/qianchuan-api.ts b/smart-admin-web-typescript/src/api/business/qianchuan-api.ts
+index 7890ea0..05b60c3 100644
+--- a/smart-admin-web-typescript/src/api/business/qianchuan-api.ts
++++ b/smart-admin-web-typescript/src/api/business/qianchuan-api.ts
+@@ -2,6 +2,7 @@ import { getRequest, postRequest, request } from '/@/lib/axios';
+ 
+ export const qianchuanApi = {
+   dashboard: (params: { startDate: string; endDate: string }) => getRequest('/qianchuan/dashboard', params),
++  dashboardTrend: (params: { startDate: string; endDate: string }) => getRequest('/qianchuan/dashboard/trend', params),
+   listAuthorizations: () => getRequest('/qianchuan/authorizations'),
+   listMerchants: () => getRequest('/qianchuan/merchants'),
+   merchantDetail: (merchantId: string, params: { startDate: string; endDate: string }) =>
+@@ -13,7 +14,8 @@ export const qianchuanApi = {
+   startAuthorization: () => postRequest('/qianchuan/authorization/start', {}),
+   exchangeAuthorization: (state: string, authCode: string) =>
+     postRequest('/qianchuan/authorization/exchange', { state, authCode }),
+-  sync: (startDate: string, endDate: string) => postRequest('/qianchuan/sync', { startDate, endDate }),
++  syncStatus: () => getRequest('/qianchuan/sync-status'),
++  manualSync: () => postRequest('/qianchuan/sync/manual', {}),
+   syncCatalog: (startDate: string, endDate: string) => postRequest('/qianchuan/catalog/sync', { startDate, endDate }),
+   listPlans: () => getRequest('/qianchuan/plans'),
+   listProducts: () => getRequest('/qianchuan/products'),
+diff --git a/smart-admin-web-typescript/src/api/support/operations-api.ts b/smart-admin-web-typescript/src/api/support/operations-api.ts
+index e83f7b6..eb95588 100644
+--- a/smart-admin-web-typescript/src/api/support/operations-api.ts
++++ b/smart-admin-web-typescript/src/api/support/operations-api.ts
+@@ -1,6 +1,7 @@
+-import { getRequest } from '/@/lib/axios';
++import { getRequest, postRequest } from '/@/lib/axios';
+ 
+ export const operationsApi = {
+   overview: () => getRequest('/support/operations/overview'),
+   syncJobs: (syncType?: string) => getRequest('/support/operations/sync-jobs', { syncType, limit: 50 }),
++  manualSync: () => postRequest('/qianchuan/sync/manual', {}),
+ };
+diff --git a/smart-admin-web-typescript/src/views/business/qianchuan/merchant-detail.vue b/smart-admin-web-typescript/src/views/business/qianchuan/merchant-detail.vue
+index d7b8332..274288e 100644
+--- a/smart-admin-web-typescript/src/views/business/qianchuan/merchant-detail.vue
++++ b/smart-admin-web-typescript/src/views/business/qianchuan/merchant-detail.vue
+@@ -7,8 +7,8 @@
+         <h1>{{ detail?.merchant?.merchantName || '鍟嗗鎶曟祦璇︽儏' }}</h1>
+         <p>鎺堟潈涓讳綋 ID锛歿{ merchantId }} <span v-if="detail"> 路 {{ detail.summary.accountCount }} 涓姇鏀捐处鎴?/span></p>
+       </div>
+-      <a-tag v-if="detail" :color="detail.merchant.status === 'AUTHORIZED' ? 'green' : 'orange'">
+-        {{ detail.merchant.status === 'AUTHORIZED' ? '宸叉巿鏉? : '闇€妫€鏌ユ巿鏉? }}
++      <a-tag v-if="detail" :color="merchantAuthColor(detail.merchant)">
++        {{ merchantAuthLabel(detail.merchant) }}
+       </a-tag>
+     </header>
+     <div class="detail-toolbar">
+@@ -113,6 +113,24 @@ const activeTab = ref('accounts');
+ const requestedDays = computed(() => dates.value[1].diff(dates.value[0], 'day') + 1);
+ const loadedDays = computed(() => detail.value ? dayjs(detail.value.endDate).diff(dayjs(detail.value.startDate), 'day') + 1 : requestedDays.value);
+ const canSyncAccounts = computed(() => detail.value?.merchant?.status === 'AUTHORIZED' && Boolean(Number(detail.value?.merchant?.isValid)));
++
++function merchantAuthLabel(merchant: { status?: string; lastError?: string | null }) {
++  if (merchant.status === 'AUTHORIZED') {
++    return merchant.lastError ? '缁湡澶辫触锛屽唴閮ㄥ鐞嗕腑' : '鑷姩缁湡涓?;
++  }
++  if (merchant.status === 'REAUTH_REQUIRED') return '璇疯仈绯诲晢瀹堕噸鏂版巿鏉?;
++  if (merchant.status === 'PENDING') return '绛夊緟鎺堟潈';
++  if (merchant.status === 'EXPIRED') return '鎺堟潈閾炬帴杩囨湡';
++  return '鏈煡鐘舵€?;
++}
++
++function merchantAuthColor(merchant: { status?: string; lastError?: string | null }) {
++  if (merchant.status === 'AUTHORIZED') return merchant.lastError ? 'orange' : 'green';
++  if (merchant.status === 'REAUTH_REQUIRED') return 'red';
++  if (merchant.status === 'PENDING') return 'gold';
++  return 'orange';
++}
++
+ let sequence = 0;
+ 
+ async function loadDetail() {
+diff --git a/smart-admin-web-typescript/src/views/support/operations/overview.vue b/smart-admin-web-typescript/src/views/support/operations/overview.vue
+index f6ccb16..8390cd1 100644
+--- a/smart-admin-web-typescript/src/views/support/operations/overview.vue
++++ b/smart-admin-web-typescript/src/views/support/operations/overview.vue
+@@ -76,12 +76,17 @@
+ 
+     <a-card class="page-card" :bordered="false" title="鍗冨窛鍚屾璁板綍">
+       <template #extra>
+-        <a-select
+-          v-model:value="selectedSyncType"
+-          class="sync-type-select"
+-          :options="syncTypeOptions"
+-          @change="loadSyncJobs"
+-        />
++        <a-space>
++          <a-button type="primary" size="small" :loading="manualSyncLoading" @click="triggerManualSync">
++            绔嬪嵆閲嶈窇
++          </a-button>
++          <a-select
++            v-model:value="selectedSyncType"
++            class="sync-type-select"
++            :options="syncTypeOptions"
++            @change="loadSyncJobs"
++          />
++        </a-space>
+       </template>
+       <a-table
+         size="small"
+@@ -121,7 +126,8 @@
+ </template>
+ 
+ <script setup lang="ts">
+-  import { computed, onMounted, ref } from 'vue';
++  import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
++  import { message } from 'ant-design-vue';
+   import { ReloadOutlined } from '@ant-design/icons-vue';
+   import { useRouter } from 'vue-router';
+   import { operationsApi } from '/@/api/support/operations-api';
+@@ -168,6 +174,8 @@
+   const loadError = ref('');
+   const errorModalOpen = ref(false);
+   const selectedJob = ref<SyncJob | null>(null);
++  const manualSyncLoading = ref(false);
++  let manualSyncPollTimer: number | undefined;
+   const offlineStyle = computed(() => ({ color: summary.value.offlineCount > 0 ? '#cf1322' : undefined }));
+ 
+   const syncTypeOptions = computed(() => [
+@@ -269,6 +277,54 @@
+   }
+ 
+   onMounted(refreshAll);
++
++  /**
++   * 杩愮淮闈㈡澘銆岀珛鍗抽噸璺戙€嶏細瑙﹀彂鍚庣寮傛 REPORT 鍚屾骞惰疆璇㈣ job 鑷崇粨鏉熴€?+   * 骞跺彂鎷掔粷锛堝悗绔笟鍔＄爜 409锛夌敱鍏ㄥ眬鍝嶅簲鎷︽埅鍣ㄧ粺涓€寮瑰嚭鎻愮ず锛岃繖閲屼笉閲嶅鎻愮ず銆?+   */
++  async function triggerManualSync() {
++    manualSyncLoading.value = true;
++    try {
++      const response = await operationsApi.manualSync();
++      const jobId = response.data?.jobId as number | undefined;
++      message.success('宸茶Е鍙戦噸璺戯紝姝ｅ湪绛夊緟鍚屾缁撴灉鈥?);
++      pollJobUntilDone(jobId);
++    } catch (error) {
++      // 鎷︽埅鍣ㄥ凡鎻愮ず锛堝涓恒€屽悓姝ヨ繘琛屼腑锛岃绋嶅悗鍐嶈瘯銆嶏級锛屽仠姝?loading 鍗冲彲銆?+      manualSyncLoading.value = false;
++      smartSentry.captureError(error);
++    }
++  }
++
++  function pollJobUntilDone(jobId?: number) {
++    stopManualSyncPolling();
++    manualSyncPollTimer = window.setInterval(async () => {
++      try {
++        const response = await operationsApi.syncJobs();
++        syncJobs.value = response.data || [];
++        const job = jobId ? syncJobs.value.find((item) => item.id === jobId) : syncJobs.value[0];
++        if (job && job.status !== 'RUNNING') {
++          if (job.syncType && !syncTypes.value.includes(job.syncType)) {
++            syncTypes.value = [...syncTypes.value, job.syncType];
++          }
++          stopManualSyncPolling();
++          manualSyncLoading.value = false;
++        }
++      } catch (error) {
++        stopManualSyncPolling();
++        manualSyncLoading.value = false;
++      }
++    }, 3000);
++  }
++
++  function stopManualSyncPolling() {
++    if (manualSyncPollTimer) {
++      clearInterval(manualSyncPollTimer);
++      manualSyncPollTimer = undefined;
++    }
++  }
++
++  onBeforeUnmount(stopManualSyncPolling);
+ </script>
+ 
+ <style lang="less" scoped>
+diff --git a/smart-admin-web-typescript/src/views/system/home/components/OverviewAlertPanels.vue b/smart-admin-web-typescript/src/views/system/home/components/OverviewAlertPanels.vue
+index b32dd76..451ce08 100644
+--- a/smart-admin-web-typescript/src/views/system/home/components/OverviewAlertPanels.vue
++++ b/smart-admin-web-typescript/src/views/system/home/components/OverviewAlertPanels.vue
+@@ -1,6 +1,6 @@
+ <template>
+   <div class="overview-alert-panels-grid">
+-    <!-- 宸︽爮锛氳捣閲忛珮鍏夎处鎴?(Scaling Accounts) -->
++    <!-- 宸︽爮锛氭秷鑰楀ご閮ㄨ处鎴?(Top Spending) -->
+     <div class="panel-card qc-card-refined">
+       <div class="panel-header">
+         <div class="panel-title-group">
+@@ -10,8 +10,8 @@
+               <polyline points="17 6 23 6 23 12" />
+             </svg>
+           </span>
+-          <h4 class="panel-title">璧烽噺璐︽埛鐩戞帶</h4>
+-          <span class="qc-pill qc-pill-green">8涓垎鍙戜腑</span>
++          <h4 class="panel-title">娑堣€楀ご閮ㄨ处鎴?/h4>
++          <span class="qc-pill qc-pill-green" v-if="scalingAccounts.length">{{ scalingAccounts.length }}涓姇鏀句腑</span>
+         </div>
+         <a-button type="link" size="small" class="view-all-btn" @click="emit('navigate', 'accounts')">
+           鏌ョ湅鍏ㄩ儴璐︽埛 鈫?@@ -19,7 +19,7 @@
+       </div>
+ 
+       <div class="panel-body">
+-        <div class="scaling-list">
++        <div class="scaling-list" v-if="scalingAccounts.length">
+           <div
+             v-for="(item, index) in scalingAccounts"
+             :key="item.id"
+@@ -36,16 +36,17 @@
+             </div>
+             <div class="spend-stats">
+               <div class="spend-val qc-tabular-nums">楼{{ item.spend.toLocaleString() }}</div>
+-              <div class="growth-rate qc-pill qc-pill-green qc-tabular-nums">
+-                鈫憑{ item.growth }}%
++              <div class="growth-rate qc-pill qc-pill-green qc-tabular-nums" v-if="item.roi !== null">
++                ROI {{ item.roi }}x
+               </div>
+             </div>
+           </div>
+         </div>
++        <div class="empty-tip" v-else>鏆傛棤鎶曟斁鏁版嵁锛岃鍏堝悓姝ユ姤琛ㄣ€?/div>
+       </div>
+     </div>
+ 
+-    <!-- 鍙虫爮锛氭帀鍏捣涓庨闄╅浄杈?(Risk Radar) -->
++    <!-- 鍙虫爮锛氶渶閲嶆柊鎺堟潈鍒楄〃 -->
+     <div class="panel-card qc-card-refined">
+       <div class="panel-header">
+         <div class="panel-title-group">
+@@ -56,65 +57,99 @@
+               <line x1="12" y1="16" x2="12.01" y2="16" />
+             </svg>
+           </span>
+-          <h4 class="panel-title">寰呭姙椋庢帶闆疯揪</h4>
+-          <span class="qc-pill qc-pill-red">5涓复鏈熸彁閱?/span>
++          <h4 class="panel-title">闇€閲嶆柊鎺堟潈</h4>
++          <span class="qc-pill qc-pill-red" v-if="riskAlerts.length">{{ riskAlerts.length }}瀹跺緟澶勭悊</span>
+         </div>
+-        <span class="status-summary">闃叉鍟嗘埛鎺夊叆鍏捣</span>
++        <span class="status-summary">浠呭湪鎺堟潈澶辨晥鏃惰仈绯诲晢瀹?/span>
+       </div>
+ 
+       <div class="panel-body">
+-        <div class="alert-list">
++        <div class="alert-list" v-if="riskAlerts.length">
+           <div
+             v-for="alert in riskAlerts"
+             :key="alert.id"
+-            class="risk-item"
+-            :class="{ 'risk-urgent': alert.daysLeft <= 1 }"
++            class="risk-item risk-urgent"
+           >
+             <div class="risk-indicator">
+-              <span class="qc-beacon-alert" v-if="alert.daysLeft <= 1"></span>
+-              <span class="dot-normal" v-else></span>
++              <span class="qc-beacon-alert"></span>
+             </div>
+             <div class="risk-info">
+               <div class="company-name">{{ alert.company }}</div>
+               <div class="owner-text">璐熻矗浜猴細{{ alert.owner }} 路 {{ alert.type }}</div>
+             </div>
+             <div class="risk-action-group">
+-              <span class="time-badge qc-tabular-nums" :class="{ urgent: alert.daysLeft <= 1 }">
+-                鍓?{{ alert.daysLeft }} 澶╁埌鏈?-              </span>
++              <span class="time-badge qc-tabular-nums urgent">璇疯仈绯诲晢瀹堕噸鏂版巿鏉?/span>
+               <a-button size="small" type="link" class="handle-btn" @click="emit('open-authorization')">
+-                璺熻繘缁害
++                鑱旂郴鍟嗗閲嶆柊鎺堟潈
+               </a-button>
+             </div>
+           </div>
+         </div>
++        <div class="empty-tip" v-else>鏆傛棤闇€閲嶆柊鎺堟潈鐨勫晢瀹躲€?/div>
+       </div>
+     </div>
+   </div>
+ </template>
+ 
+ <script setup lang="ts">
+-  import { ref } from 'vue';
++  import { computed } from 'vue';
++
++  const props = defineProps<{
++    accounts?: any[];
++    authorizations?: any[];
++  }>();
+ 
+   const emit = defineEmits<{
+     navigate: [sectionId: string];
+     'open-authorization': [];
+   }>();
+ 
+-  // 妯℃嫙璧烽噺璐︽埛涓庢帀鍏捣璐︽埛锛堣创鍚堟姇娴佷笟鍔＄湡瀹炲満鏅級
+-  const scalingAccounts = ref([
+-    { id: 'AD-9821', name: '缇庡涓姢-鐖嗗搧01缁?, merchant: '骞垮窞涓戒汉缇庡', operator: '闄堟枃闈?, spend: 12800, growth: 245 },
+-    { id: 'AD-9822', name: '鏈嶉グ鎹㈠-缇界粧涓撳満', merchant: '鏉窞鍥涘闈掓湇楗?, operator: '寮犳櫒', spend: 9600, growth: 186 },
+-    { id: 'AD-9823', name: '椋熷搧鐢熼矞-鍧氭灉澶т績', merchant: '涓夊彧鏋滃洯鍟嗚锤', operator: '鐜嬪皬浼?, spend: 8500, growth: 152 },
+-    { id: 'AD-9824', name: '3C鏁扮爜-蹇厖閰嶄欢', merchant: '娣卞湷鍊嶇數绉戞妧', operator: '璧靛皬闆?, spend: 7200, growth: 138 },
+-  ]);
+-
+-  const riskAlerts = ref([
+-    { id: 'R-1', company: '鏉窞鐭ュ懗瑙傞楗鐞嗗叕鍙?, owner: '寮犱笁', type: '浠ｆ姇鐩磋惀', daysLeft: 1 },
+-    { id: 'R-2', company: '骞垮窞澶╂厱鏃ュ寲鐢ㄥ搧鏈夐檺璐ｄ换鍏徃', owner: '鏉庡洓', type: '鍒嗕剑鍚堜綔', daysLeft: 2 },
+-    { id: 'R-3', company: '瀹佹尝濂ユ嫇鏅鸿兘绉戞妧鏈夐檺鍏徃', owner: '鐜嬩簲', type: '浠ｆ姇鐩磋惀', daysLeft: 2 },
+-    { id: 'R-4', company: '浣涘北绮惧伐瀹跺眳鐢ㄥ搧鍟嗚', owner: '璧靛叚', type: '鍒嗕剑鍚堜綔', daysLeft: 3 },
+-  ]);
++  const scalingAccounts = computed(() =>
++    (props.accounts || [])
++      .filter((account: any) => Number(account.totalSpend) > 0)
++      .sort((a: any, b: any) => Number(b.totalSpend) - Number(a.totalSpend))
++      .slice(0, 4)
++      .map((account: any) => ({
++        id: account.advertiserId,
++        name: account.advertiserName || '鏈懡鍚嶈处鎴?,
++        merchant: account.merchantName || account.companyName || '鏈煡鍟嗗',
++        operator: account.operatorName || '鏈垎閰?,
++        spend: Number(account.totalSpend || 0),
++        roi: roiOf(account),
++      }))
++  );
++
++  const riskAlerts = computed(() => {
++    const ownerOf = accountMap();
++    return (props.authorizations || [])
++      .filter((item: any) => item.status === 'REAUTH_REQUIRED')
++      .slice(0, 4)
++      .map((item: any) => ({
++        id: item.state || item.advertiserId,
++        company: item.merchantName || '鏈煡鍟嗗',
++        owner: ownerOf.get(String(item.advertiserId))?.operatorName || '鏈垎閰?,
++        type: cooperationLabel(ownerOf.get(String(item.advertiserId))?.cooperationMode || ''),
++      }));
++  });
++
++  function roiOf(account: any) {
++    const spend = Number(account.totalSpend || 0);
++    const gmv = Number(account.totalGmv || 0);
++    if (spend <= 0) return null;
++    return (gmv / spend).toFixed(2);
++  }
++
++  function accountMap() {
++    const map = new Map<string, any>();
++    (props.accounts || []).forEach((account: any) => map.set(String(account.advertiserId), account));
++    return map;
++  }
++
++  function cooperationLabel(mode: string) {
++    if (mode === 'COMMISSION') return '鍒嗕剑鍚堜綔';
++    if (mode === 'AGENCY') return '浠ｆ姇鐩磋惀';
++    return '鎺堟潈缁存姢';
++  }
+ </script>
+ 
+ <style lang="less" scoped>
+@@ -196,6 +231,13 @@
+     gap: 10px;
+   }
+ 
++  .empty-tip {
++    padding: 20px 0;
++    text-align: center;
++    font-size: 12px;
++    color: var(--qc-text-tertiary);
++  }
++
+   .scaling-item {
+     display: flex;
+     align-items: center;
+diff --git a/smart-admin-web-typescript/src/views/system/home/components/OverviewTrendCharts.vue b/smart-admin-web-typescript/src/views/system/home/components/OverviewTrendCharts.vue
+index 85a206e..6e891c1 100644
+--- a/smart-admin-web-typescript/src/views/system/home/components/OverviewTrendCharts.vue
++++ b/smart-admin-web-typescript/src/views/system/home/components/OverviewTrendCharts.vue
+@@ -17,6 +17,7 @@
+         </div>
+       </div>
+       <div ref="trendChartRef" class="echarts-box"></div>
++      <div class="chart-empty" v-if="!(props.trend || []).length">鏆傛棤鍒嗘椂鏁版嵁锛岃鍏堝悓姝ユ姤琛?/div>
+     </div>
+ 
+     <!-- 涓氬姟缁撴瀯鍒嗗竷 -->
+@@ -30,16 +31,17 @@
+         </div>
+       </div>
+       <div ref="pieChartRef" class="echarts-box"></div>
++      <div class="chart-empty" v-if="!(props.dashboard.accounts || []).some((a) => Number(a.totalSpend || 0) > 0)">鏆傛棤鍚堜綔妯″紡鏁版嵁锛岃鍏堟爣璁板悎浣滄柟寮?/div>
+       <div class="distribution-legend">
+         <div class="legend-item">
+           <span class="dot dot-commission"></span>
+           <span class="name">鍒嗕剑妯″紡 (Commission)</span>
+-          <span class="val qc-tabular-nums">52.5%</span>
++          <span class="val qc-tabular-nums">{{ commissionPct }}</span>
+         </div>
+         <div class="legend-item">
+           <span class="dot dot-agency"></span>
+           <span class="name">浠ｆ姇妯″紡 (Agency)</span>
+-          <span class="val qc-tabular-nums">47.5%</span>
++          <span class="val qc-tabular-nums">{{ agencyPct }}</span>
+         </div>
+       </div>
+     </div>
+@@ -47,7 +49,7 @@
+ </template>
+ 
+ <script setup lang="ts">
+-  import { ref, onMounted, onUnmounted, watch } from 'vue';
++  import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+   import * as echarts from 'echarts';
+ 
+   const props = defineProps<{
+@@ -58,6 +60,7 @@
+       accounts?: any[];
+       lastFetchedAt?: string | null;
+     };
++    trend?: any[];
+   }>();
+ 
+   const trendViewMode = ref<'HOURLY' | 'DAILY'>('HOURLY');
+@@ -74,14 +77,19 @@
+ 
+     trendChart = echarts.init(trendChartRef.value);
+ 
+-    const hours = [
+-      '00:00', '02:00', '04:00', '06:00', '08:00', '10:00', 
+-      '12:00', '14:00', '16:00', '18:00', '20:00', '22:00', '24:00'
+-    ];
+-
+-    // 鍩轰簬鐪熷疄娑堣€楁垨骞虫粦妯℃嫙鐨勫垎鏃跺舰鎬?-    const spendData = [1200, 800, 450, 600, 2400, 5800, 8900, 7200, 9400, 13500, 18600, 14200, 8500];
+-    const gmvData = [4800, 3100, 1800, 2400, 9600, 24500, 38000, 31000, 41000, 62000, 89000, 64000, 36000];
++    const points = props.trend || [];
++    const isDaily = trendViewMode.value === 'DAILY';
++    const buckets = new Map<string, { spend: number; gmv: number }>();
++    points.forEach((point: any) => {
++      const key = isDaily ? dayOf(point.time) : hourOf(point.time);
++      const entry = buckets.get(key) || { spend: 0, gmv: 0 };
++      entry.spend += Number(point.spend || 0);
++      entry.gmv += Number(point.gmv || 0);
++      buckets.set(key, entry);
++    });
++    const keys = [...buckets.keys()].sort();
++    const spendData = keys.map((key) => buckets.get(key)!.spend);
++    const gmvData = keys.map((key) => buckets.get(key)!.gmv);
+ 
+     const option: echarts.EChartsOption = {
+       tooltip: {
+@@ -130,7 +138,7 @@
+       },
+       xAxis: {
+         type: 'category',
+-        data: hours,
++        data: keys,
+         boundaryGap: false,
+         axisLine: { lineStyle: { color: '#e2e8f0' } },
+         axisLabel: { color: '#94a3b8', fontSize: 11 },
+@@ -205,6 +213,14 @@
+ 
+     pieChart = echarts.init(pieChartRef.value);
+ 
++    const accounts = props.dashboard.accounts || [];
++    const commissionSpend = accounts
++      .filter((account: any) => account.cooperationMode === 'COMMISSION')
++      .reduce((sum: number, account: any) => sum + Number(account.totalSpend || 0), 0);
++    const agencySpend = accounts
++      .filter((account: any) => account.cooperationMode === 'AGENCY')
++      .reduce((sum: number, account: any) => sum + Number(account.totalSpend || 0), 0);
++
+     const option: echarts.EChartsOption = {
+       tooltip: {
+         trigger: 'item',
+@@ -231,7 +247,7 @@
+             show: true,
+             position: 'center',
+             formatter: () => {
+-              const roiVal = props.dashboard.roi ? `${props.dashboard.roi}x` : '4.08x';
++              const roiVal = props.dashboard.roi ? `${props.dashboard.roi}x` : '--';
+               return `{roi|${roiVal}}\n{label|缁煎悎鎶曚骇姣攠`;
+             },
+             rich: {
+@@ -251,12 +267,12 @@
+           },
+           data: [
+             {
+-              value: 274612,
++              value: commissionSpend,
+               name: '鍒嗕剑妯″紡',
+               itemStyle: { color: '#2563eb' },
+             },
+             {
+-              value: 248897,
++              value: agencySpend,
+               name: '浠ｆ姇妯″紡',
+               itemStyle: { color: '#8b5cf6' },
+             },
+@@ -268,6 +284,29 @@
+     pieChart.setOption(option);
+   }
+ 
++  function dayOf(value: any) {
++    return String(value).slice(0, 10);
++  }
++
++  function hourOf(value: any) {
++    const s = String(value);
++    const t = s.indexOf('T');
++    return t >= 0 ? s.slice(t + 1, t + 6) : s.slice(11, 16);
++  }
++
++  const commissionPct = computed(() => piePercent('COMMISSION'));
++  const agencyPct = computed(() => piePercent('AGENCY'));
++
++  function piePercent(mode: string) {
++    const accounts = props.dashboard.accounts || [];
++    const total = accounts.reduce((sum: number, account: any) => sum + Number(account.totalSpend || 0), 0);
++    if (total <= 0) return '0%';
++    const part = accounts
++      .filter((account: any) => account.cooperationMode === mode)
++      .reduce((sum: number, account: any) => sum + Number(account.totalSpend || 0), 0);
++    return `${((part / total) * 100).toFixed(1)}%`;
++  }
++
+   function handleResize() {
+     trendChart?.resize();
+     pieChart?.resize();
+@@ -319,6 +358,7 @@
+     display: flex;
+     flex-direction: column;
+     min-height: 380px;
++    position: relative;
+   }
+ 
+   .chart-header {
+@@ -361,6 +401,19 @@
+     min-height: 280px;
+   }
+ 
++  .chart-empty {
++    position: absolute;
++    inset: 46px 20px 20px 20px;
++    display: flex;
++    align-items: center;
++    justify-content: center;
++    font-size: 12px;
++    color: var(--qc-text-tertiary);
++    background: rgba(248, 250, 252, 0.72);
++    border-radius: 8px;
++    z-index: 1;
++  }
++
+   .distribution-legend {
+     display: flex;
+     justify-content: space-around;
+diff --git a/smart-admin-web-typescript/src/views/system/home/components/overview-components.test.ts b/smart-admin-web-typescript/src/views/system/home/components/overview-components.test.ts
+index bf1f49f..0247c40 100644
+--- a/smart-admin-web-typescript/src/views/system/home/components/overview-components.test.ts
++++ b/smart-admin-web-typescript/src/views/system/home/components/overview-components.test.ts
+@@ -60,21 +60,41 @@ describe('Overview Components', () => {
+   });
+ 
+   it('emits events from OverviewAlertPanels', async () => {
+-    const wrapper = mount(OverviewAlertPanels);
++    const accounts = [
++      { advertiserId: 10, advertiserName: '鐢茶处鎴?, merchantName: '鐢插晢瀹?, operatorName: '寮犱笁', totalSpend: 100, totalGmv: 300 },
++    ];
++    const authorizations = [
++      { state: 's1', advertiserId: 10, merchantName: '鐢插晢瀹?, status: 'REAUTH_REQUIRED' },
++    ];
++    const wrapper = mount(OverviewAlertPanels, { props: { accounts, authorizations } });
+ 
+-    expect(wrapper.text()).toContain('璧烽噺璐︽埛鐩戞帶');
+-    expect(wrapper.text()).toContain('寰呭姙椋庢帶闆疯揪');
++    expect(wrapper.text()).toContain('娑堣€楀ご閮ㄨ处鎴?);
++    expect(wrapper.text()).toContain('闇€閲嶆柊鎺堟潈');
++    expect(wrapper.text()).toContain('鐢茶处鎴?);
++    expect(wrapper.text()).toContain('鐢插晢瀹?);
++    expect(wrapper.text()).toContain('璇疯仈绯诲晢瀹堕噸鏂版巿鏉?);
++    expect(wrapper.text()).not.toContain('鍓?1 澶╁埌鏈?);
++    expect(wrapper.text()).not.toContain('REAUTH_REQUIRED');
+ 
+     // 鐐瑰嚮鏌ョ湅鍏ㄩ儴
+     await wrapper.find('.view-all-btn').trigger('click');
+     expect(wrapper.emitted('navigate')).toEqual([['accounts']]);
+ 
+-    // 鐐瑰嚮绗竴涓捣閲忚处鎴?+    // 鐐瑰嚮绗竴涓ご閮ㄨ处鎴?     await wrapper.findAll('.scaling-item')[0].trigger('click');
+     expect(wrapper.emitted('navigate')).toEqual([['accounts'], ['accounts']]);
+ 
+-    // 鐐瑰嚮缁害
++    // 鐐瑰嚮鑱旂郴鍟嗗閲嶆柊鎺堟潈
+     await wrapper.findAll('.handle-btn')[0].trigger('click');
+     expect(wrapper.emitted('open-authorization')).toBeTruthy();
+   });
++
++  it('shows empty states in OverviewAlertPanels when no data is available', () => {
++    const wrapper = mount(OverviewAlertPanels, { props: { accounts: [], authorizations: [] } });
++
++    expect(wrapper.text()).toContain('鏆傛棤鎶曟斁鏁版嵁锛岃鍏堝悓姝ユ姤琛?);
++    expect(wrapper.text()).toContain('鏆傛棤闇€閲嶆柊鎺堟潈鐨勫晢瀹?);
++    expect(wrapper.findAll('.scaling-item').length).toBe(0);
++    expect(wrapper.findAll('.handle-btn').length).toBe(0);
++  });
+ });
+diff --git a/smart-admin-web-typescript/src/views/system/home/composables/useWorkbench.ts b/smart-admin-web-typescript/src/views/system/home/composables/useWorkbench.ts
+index 144759b..6dc5ffc 100644
+--- a/smart-admin-web-typescript/src/views/system/home/composables/useWorkbench.ts
++++ b/smart-admin-web-typescript/src/views/system/home/composables/useWorkbench.ts
+@@ -32,7 +32,9 @@ function createWorkbenchStore() {
+   // 閫氱敤鐘舵€?   // ---------------------------------------------------------------------------
+   const loading = ref(false);
+-  const syncing = ref(false);
++  const syncHealth = reactive<{ color: string; lastSuccessAt: string | null; todayCoverageRate: number; todayFailedAccounts: number }>({
++    color: 'GREEN', lastSuccessAt: null, todayCoverageRate: 1, todayFailedAccounts: 0,
++  });
+   const activeSection = ref<WorkbenchSectionId>('overview');
+   const mobileNavigationCollapsed = ref(false);
+   const workbenchContent = ref<HTMLElement>();
+@@ -64,9 +66,7 @@ function createWorkbenchStore() {
+   const authorizationColumns = [
+     { title: '鍟嗗', dataIndex: 'merchantName', key: 'merchantName' },
+     { title: '鎺堟潈涓讳綋 ID', dataIndex: 'advertiserId', key: 'advertiserId' },
+-    { title: '鐘舵€?, key: 'status' },
+-    { title: '鎺堟潈鍒版湡鏃堕棿', key: 'expiresAt' },
+-    { title: '鍓╀綑鏃堕棿', key: 'daysRemaining' },
++    { title: '鎺堟潈鐘舵€?, key: 'status' },
+   ];
+ 
+   // ---------------------------------------------------------------------------
+@@ -368,12 +368,22 @@ function createWorkbenchStore() {
+     return '宸插悓姝?;
+   }
+ 
+-  function authorizationLabel(status: string) {
+-    return ({ AUTHORIZED: '宸叉巿鏉?, PENDING: '绛夊緟鎺堟潈', REAUTH_REQUIRED: '闇€閲嶆柊鎺堟潈', EXPIRED: '鎺堟潈閾炬帴杩囨湡' })[status] || status;
++  function authorizationLabel(status: string, lastError?: string | null) {
++    if (status === 'AUTHORIZED') {
++      return lastError ? '缁湡澶辫触锛屽唴閮ㄥ鐞嗕腑' : '鑷姩缁湡涓?;
++    }
++    if (status === 'REAUTH_REQUIRED') return '璇疯仈绯诲晢瀹堕噸鏂版巿鏉?;
++    if (status === 'PENDING') return '绛夊緟鎺堟潈';
++    if (status === 'EXPIRED') return '鎺堟潈閾炬帴杩囨湡';
++    return '鏈煡鐘舵€?;
+   }
+ 
+-  function authorizationColor(status: string) {
+-    return ({ AUTHORIZED: 'green', PENDING: 'gold', REAUTH_REQUIRED: 'red', EXPIRED: 'orange' })[status] || 'default';
++  function authorizationColor(status: string, lastError?: string | null) {
++    if (status === 'AUTHORIZED') return lastError ? 'orange' : 'green';
++    if (status === 'REAUTH_REQUIRED') return 'red';
++    if (status === 'PENDING') return 'gold';
++    if (status === 'EXPIRED') return 'orange';
++    return 'default';
+   }
+ 
+   function feeRateTypeLabel(rateType: string) {
+@@ -423,13 +433,17 @@ function createWorkbenchStore() {
+   async function loadDashboard() {
+     loading.value = true;
+     try {
+-      const [dashboardResult, authResult, accountsResult, merchantResult] = await Promise.all([
++      const [dashboardResult, authResult, accountsResult, merchantResult, trendResult, syncStatusResult] = await Promise.all([
+         qianchuanApi.dashboard({ startDate: dateValue(startDate.value), endDate: dateValue(endDate.value) }),
+         qianchuanApi.listAuthorizations(),
+         qianchuanApi.listAccounts(),
+         qianchuanApi.listMerchants(),
++        qianchuanApi.dashboardTrend({ startDate: dateValue(startDate.value), endDate: dateValue(endDate.value) }),
++        qianchuanApi.syncStatus(),
+       ]);
++      if (syncStatusResult.data) Object.assign(syncHealth, syncStatusResult.data);
+       Object.assign(dashboard, dashboardResult.data || {});
++      dashboard.trend = trendResult.data || [];
+       // dashboard 鐨?accounts[] 涓嶅惈浣欓/璐熻矗浜?鍟嗗姟/鍚堜綔鏂瑰紡锛屼粠 /qianchuan/accounts 鎸夎处鎴?ID 琛ラ綈
+       const accountExtras = new Map<string, any>((accountsResult.data || []).map((item: any) => [String(item.advertiserId), item]));
+       (dashboard.accounts || []).forEach((account: any) => {
+@@ -450,16 +464,12 @@ function createWorkbenchStore() {
+     }
+   }
+ 
+-  async function syncReports() {
+-    syncing.value = true;
++  async function loadSyncStatus() {
+     try {
+-      const result = await qianchuanApi.sync(dateValue(startDate.value), dateValue(endDate.value));
+-      message.success(`鍚屾瀹屾垚锛?{result.data.accountCount} 涓处鎴凤紝${result.data.rowCount} 鏉″皬鏃舵暟鎹甡);
+-      await loadDashboard();
+-    } catch (error) {
+-      showSyncError(error);
+-    } finally {
+-      syncing.value = false;
++      const res = await qianchuanApi.syncStatus();
++      if (res.data) Object.assign(syncHealth, res.data);
++    } catch (e) {
++      console.error('loadSyncStatus', e);
+     }
+   }
+ 
+@@ -933,7 +943,7 @@ function createWorkbenchStore() {
+ 
+   return {
+     // 閫氱敤
+-    loading, syncing, activeSection, mobileNavigationCollapsed, workbenchContent,
++    loading, syncHealth, activeSection, mobileNavigationCollapsed, workbenchContent,
+     startDate, endDate, dashboard, isLocalDevelopment,
+     // 鍟嗗 / 鎺堟潈
+     merchants, authorizations, authorizationLoading, authorizationVisible, authorizationStep,
+@@ -962,7 +972,7 @@ function createWorkbenchStore() {
+     roiLevelClass, dateValue, formatMoney, formatNumber, calculateRoi, formatDateTime, formatDateOnly,
+     accountDataStatus, authorizationLabel, authorizationColor, feeRateTypeLabel, monitorRuleLabel,
+     merchantHref, navigateToSection, openSystemManagement, resetAccountFilters, showSyncError,
+-    loadDashboard, syncReports, loadCatalogTab, loadProductReportConfig, queryProductReport,
++    loadDashboard, loadSyncStatus, loadCatalogTab, loadProductReportConfig, queryProductReport,
+     productReportValue, formatProductReportLimits, syncCatalog, setCooperationMode, editCatalogMetadata,
+     loadMonitorData, loadFeeRates, openFeeRateEditor, saveFeeRate, deleteFeeRate, loadMonitorLogs,
+     saveMonitor, saveActionGuardrail, updateMonitorLogHandled, loadBannedTerms, addBannedTerms,
+diff --git a/smart-admin-web-typescript/src/views/system/home/index.vue b/smart-admin-web-typescript/src/views/system/home/index.vue
+index 6cab7ef..6337382 100644
+--- a/smart-admin-web-typescript/src/views/system/home/index.vue
++++ b/smart-admin-web-typescript/src/views/system/home/index.vue
+@@ -15,7 +15,7 @@
+         v-if="reauthorizationCount > 0"
+         type="warning"
+         show-icon
+-        message="鏈夊晢瀹舵巿鏉冨凡澶辨晥锛岄渶瑕侀噸鏂版巿鏉冨悗鎵嶈兘缁х画鍚屾銆?
++        message="鏈夊晢瀹舵巿鏉冨凡澶辨晥锛岃鑱旂郴鍟嗗閲嶆柊鎺堟潈鍚庢墠鑳界户缁悓姝ャ€?
+         class="reauthorization-alert"
+       />
+       <a-alert
+diff --git a/smart-admin-web-typescript/src/views/system/home/sections/AuthorizationSection.vue b/smart-admin-web-typescript/src/views/system/home/sections/AuthorizationSection.vue
+index b43a95f..6add51e 100644
+--- a/smart-admin-web-typescript/src/views/system/home/sections/AuthorizationSection.vue
++++ b/smart-admin-web-typescript/src/views/system/home/sections/AuthorizationSection.vue
+@@ -8,7 +8,9 @@
+             <a :href="merchantHref(record.merchantId)">{{ record.merchantName }} 鈫?/a>
+           </template>
+           <template v-else-if="column.key === 'status'">
+-            <a-tag :color="authorizationColor(record.status)">{{ authorizationLabel(record.status) }}</a-tag>
++            <a-tag :color="authorizationColor(record.status, record.lastError)">
++              {{ authorizationLabel(record.status, record.lastError) }}
++            </a-tag>
+           </template>
+           <template v-else-if="column.key === 'lastAccountSyncAt'">{{ formatDateTime(record.lastAccountSyncAt) }}</template>
+         </template>
+@@ -32,14 +34,10 @@
+             <span v-else>{{ record.merchantName }}</span>
+           </template>
+           <template v-else-if="column.key === 'status'">
+-            <a-tag :color="authorizationColor(record.status)">{{ authorizationLabel(record.status) }}</a-tag>
+-            <div v-if="record.lastError" class="error-text">{{ record.lastError }}</div>
+-          </template>
+-          <template v-else-if="column.key === 'expiresAt'">{{ formatDateTime(record.refreshExpiresAt) }}</template>
+-          <template v-else-if="column.key === 'daysRemaining'">
+-            <a-tag :color="Number(record.refreshDaysRemaining) <= 7 ? 'orange' : 'blue'">
+-              {{ record.refreshDaysRemaining == null ? '鏈煡' : `${record.refreshDaysRemaining} 澶ー }}
++            <a-tag :color="authorizationColor(record.status, record.lastError)">
++              {{ authorizationLabel(record.status, record.lastError) }}
+             </a-tag>
++            <div v-if="record.lastError && record.status === 'AUTHORIZED'" class="error-text">{{ record.lastError }}</div>
+           </template>
+         </template>
+       </a-table>
+diff --git a/smart-admin-web-typescript/src/views/system/home/sections/OverviewSection.vue b/smart-admin-web-typescript/src/views/system/home/sections/OverviewSection.vue
+index 9106aca..1375146 100644
+--- a/smart-admin-web-typescript/src/views/system/home/sections/OverviewSection.vue
++++ b/smart-admin-web-typescript/src/views/system/home/sections/OverviewSection.vue
+@@ -11,7 +11,9 @@
+         <a-date-picker v-model:value="endDate" :allow-clear="false" />
+         <a-button :loading="loading" @click="loadDashboard">鏌ヨ</a-button>
+         <a-button type="primary" @click="openAuthorization">鎺ュ叆鍟嗗</a-button>
+-        <a-button :loading="syncing" @click="syncReports">鍚屾鏁版嵁</a-button>
++        <span class="sync-indicator" :class="syncHealth.color.toLowerCase()">
++          鈼?鏁版嵁鎴嚦 {{ syncHealth.lastSuccessAt || '--' }}
++        </span>
+       </a-space>
+     </header>
+ 
+@@ -24,10 +26,12 @@
+     />
+ 
+     <!-- 2. 灏忔椂绾ф姇鏀捐蛋鍔夸笌妯″紡鍒嗗竷鍙鍖栧ぇ鐩?-->
+-    <OverviewTrendCharts :dashboard="dashboard" />
++    <OverviewTrendCharts :dashboard="dashboard" :trend="dashboard.trend || []" />
+ 
+-    <!-- 3. 浣滄垬鎸囨尌涓庝复鏈?椋庢帶闆疯揪鍙屾爮 -->
++    <!-- 3. 娑堣€楀ご閮ㄨ处鎴蜂笌闇€閲嶆柊鎺堟潈鍙屾爮 -->
+     <OverviewAlertPanels
++      :accounts="dashboard.accounts || []"
++      :authorizations="authorizations"
+       @navigate="navigateToSection"
+       @open-authorization="openAuthorization"
+     />
+@@ -44,13 +48,23 @@
+     startDate,
+     endDate,
+     loading,
+-    syncing,
++    syncHealth,
+     loadDashboard,
+-    syncReports,
+     openAuthorization,
+     navigateToSection,
+     formatMoney,
+     formatNumber,
+     dashboard,
++    authorizations,
+   } = useWorkbench();
+ </script>
++
++<style scoped>
++.sync-indicator {
++  font-size: 13px;
++  white-space: nowrap;
++}
++.sync-indicator.green { color: #52c41a; }
++.sync-indicator.yellow { color: #faad14; }
++.sync-indicator.red { color: #ff4d4f; }
++</style>

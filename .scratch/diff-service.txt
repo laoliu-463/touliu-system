@@ -1,0 +1,622 @@
+diff --git a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanService.java b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanService.java
+index 4ad1a2f..d42f522 100644
+--- a/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanService.java
++++ b/smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/module/business/qianchuan/service/QianchuanService.java
+@@ -8,13 +8,19 @@ import net.lab1024.sa.admin.module.business.qianchuan.domain.QianchuanApiClient;
+ import net.lab1024.sa.admin.module.business.qianchuan.domain.QianchuanApiException;
+ import net.lab1024.sa.admin.module.business.qianchuan.domain.ProductReportQueryForm;
+ import net.lab1024.sa.admin.module.business.qianchuan.domain.FeeRateForm;
++import org.springframework.dao.DataAccessException;
+ import org.springframework.beans.factory.annotation.Value;
++import org.springframework.boot.context.event.ApplicationReadyEvent;
++import org.springframework.context.event.EventListener;
+ import org.springframework.jdbc.core.JdbcTemplate;
+ import org.springframework.scheduling.annotation.Scheduled;
+ import org.springframework.stereotype.Service;
+ import org.springframework.transaction.PlatformTransactionManager;
+ import org.springframework.transaction.annotation.Transactional;
+ import org.springframework.transaction.support.TransactionTemplate;
++import org.springframework.transaction.support.TransactionSynchronization;
++import org.springframework.transaction.support.TransactionSynchronizationManager;
++import net.lab1024.sa.base.common.domain.ResponseDTO;
+ 
+ import java.math.BigDecimal;
+ import java.math.RoundingMode;
+@@ -31,6 +37,7 @@ import java.util.List;
+ import java.util.Locale;
+ import java.util.Map;
+ import java.util.UUID;
++import java.util.concurrent.CompletableFuture;
+ 
+ @Slf4j
+ @Service
+@@ -42,6 +49,8 @@ public class QianchuanService {
+     private static final long ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60;
+     private static final long REFRESH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
+     private static final long OAUTH_STATE_TTL_MINUTES = 30;
++    /** refresh 剩余不超过该天数时主动续期，避免滚动窗口耗尽。 */
++    private static final long REFRESH_PROACTIVE_DAYS = 7;
+     private static final String MERCHANT_NAME_PENDING_SYNC = "待同步识别";
+ 
+     @Resource
+@@ -62,6 +71,26 @@ public class QianchuanService {
+     @Value("${qianchuan.redirect-uri:}")
+     private String redirectUri;
+ 
++    /**
++     * 启动对账：服务重启会杀死正在执行的同步线程，但 sync_job 行停留在 RUNNING 无人写回，
++     * 变成僵尸记录。应用启动瞬间不可能有活跃同步线程，因此把所有 RUNNING 行标记为 INTERRUPTED。
++     */
++    @EventListener(ApplicationReadyEvent.class)
++    public void reconcileInterruptedSyncJobs() {
++        try {
++            int affected = jdbcTemplate.update("""
++                    UPDATE qianchuan_sync_job
++                       SET status = 'INTERRUPTED', end_time = ?, error_message = '服务重启导致同步中断（启动对账）'
++                     WHERE status = 'RUNNING'
++                    """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI)));
++            if (affected > 0) {
++                log.warn("启动对账：清理 {} 条因服务重启遗留的 RUNNING 同步记录为 INTERRUPTED", affected);
++            }
++        } catch (DataAccessException e) {
++            log.error("启动对账清理 RUNNING 同步记录失败", e);
++        }
++    }
++
+     public Map<String, Object> startAuthorization(String merchantName) {
+         String state = UUID.randomUUID().toString().replace("-", "");
+         String initialMerchantName = merchantName == null || merchantName.isBlank()
+@@ -128,6 +157,19 @@ public class QianchuanService {
+                 merchantIdentity == null ? null : QianchuanApiClient.text(merchantIdentity, "account_role"),
+                 merchantIdentity == null ? null : merchantIdentity.path("is_valid").asBoolean(true), state);
+ 
++        // 授权写入提交后异步触发首次同步：发现账户 + 拉当天报表，不阻塞回调响应。
++        final String syncedState = state;
++        if (TransactionSynchronizationManager.isSynchronizationActive()) {
++            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
++                @Override
++                public void afterCommit() {
++                    CompletableFuture.runAsync(() -> autoSyncNewMerchant(syncedState));
++                }
++            });
++        } else {
++            CompletableFuture.runAsync(() -> autoSyncNewMerchant(syncedState));
++        }
++
+         Map<String, Object> result = new LinkedHashMap<>();
+         result.put("merchantName", merchantName);
+         result.put("lastError", nameError);
+@@ -144,6 +186,19 @@ public class QianchuanService {
+                 + "<p>授权凭证已由服务端保存。</p><p>请返回管理系统查看商家名称和授权状态。</p></body></html>";
+     }
+ 
++    /**
++     * 新授权后自动同步：发现账户 + 拉当天报表。失败只记日志，不影响授权流程。
++     */
++    private void autoSyncNewMerchant(String state) {
++        try {
++            syncAccounts(state);
++            LocalDate today = LocalDate.now(SHANGHAI);
++            syncReportOnly(today, today);
++        } catch (Exception e) {
++            log.warn("新授权自动同步失败 state={} error={}", state, e.getMessage());
++        }
++    }
++
+     public List<Map<String, Object>> listAuthorizations() {
+         return jdbcTemplate.queryForList("""
+                 SELECT state, merchant_name AS merchantName, advertiser_id AS advertiserId,
+@@ -208,6 +263,21 @@ public class QianchuanService {
+         return result;
+     }
+ 
++    public List<Map<String, Object>> dashboardTrend(LocalDate startDate, LocalDate endDate) {
++        return jdbcTemplate.queryForList("""
++                SELECT stat_time_hour AS time,
++                       COALESCE(SUM(stat_cost), 0) AS spend,
++                       COALESCE(SUM(pay_order_gmv), 0) AS gmv
++                  FROM qianchuan_report_hour
++                 WHERE stat_time_hour >= ? AND stat_time_hour < ?
++                 GROUP BY stat_time_hour
++                 ORDER BY stat_time_hour
++                """, Timestamp.valueOf(startDate.atStartOfDay()), Timestamp.valueOf(endDate.plusDays(1).atStartOfDay()));
++    }
++
++    /**
++     * 组合同步：账户发现 + 报表拉取。保留给旧接口 /qianchuan/sync 和运维面板「立即重跑」。
++     */
+     public synchronized Map<String, Object> sync(LocalDate startDate, LocalDate endDate) {
+         validateDateRange(startDate, endDate, 30);
+ 
+@@ -217,25 +287,47 @@ public class QianchuanService {
+         Long jobId = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
+         int accountsSynced = 0;
+         int rowsSynced = 0;
++        int accountsFailed = 0;
++        List<String> failedDetails = new ArrayList<>();
+ 
+         try {
+             List<Map<String, Object>> authorizations = jdbcTemplate.queryForList(
+                     "SELECT state FROM qianchuan_authorization WHERE auth_status = 'AUTHORIZED' ORDER BY id");
+             for (Map<String, Object> authorization : authorizations) {
+                 String state = String.valueOf(authorization.get("state"));
+-                List<Long> advertiserIds = syncAccounts(state);
+-                accountsSynced += advertiserIds.size();
+-                String accessToken = getValidAccessToken(state);
+-                for (Long advertiserId : advertiserIds) {
+-                    rowsSynced += syncReports(accessToken, advertiserId, startDate, endDate);
++                List<Long> advertiserIds;
++                String accessToken;
++                try {
++                    advertiserIds = syncAccounts(state);
++                    accessToken = getValidAccessToken(state);
++                } catch (RuntimeException authError) {
++                    accountsFailed++;
++                    String msg = safeError(authError.getMessage());
++                    failedDetails.add("auth:" + state + ": " + msg);
++                    log.warn("同步报表授权级失败已跳过 state={} error={}", state, msg);
++                    continue;
+                 }
++                int[] result = syncReportsForAccounts(accessToken, advertiserIds, startDate, endDate, failedDetails);
++                accountsSynced += result[0];
++                rowsSynced += result[1];
++                accountsFailed += result[2];
+             }
++            String status = failedDetails.isEmpty() ? "SUCCESS" : "PARTIAL";
++            String errorSummary = failedDetails.isEmpty() ? null
++                    : accountsFailed + " 个账户失败: " + String.join("; ", failedDetails.subList(0, Math.min(5, failedDetails.size())));
+             jdbcTemplate.update("""
+-                    UPDATE qianchuan_sync_job SET end_time = ?, account_count = ?, row_count = ?, status = 'SUCCESS'
++                    UPDATE qianchuan_sync_job SET end_time = ?, account_count = ?, row_count = ?, status = ?, error_message = ?
+                      WHERE id = ?
+-                    """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI)), accountsSynced, rowsSynced, jobId);
+-            return Map.of("jobId", jobId, "accountCount", accountsSynced, "rowCount", rowsSynced,
+-                    "startDate", startDate.toString(), "endDate", endDate.toString(), "status", "SUCCESS");
++                    """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI)), accountsSynced, rowsSynced, status, errorSummary, jobId);
++            Map<String, Object> result = new LinkedHashMap<>();
++            result.put("jobId", jobId);
++            result.put("accountCount", accountsSynced);
++            result.put("rowCount", rowsSynced);
++            result.put("accountsFailed", accountsFailed);
++            result.put("startDate", startDate.toString());
++            result.put("endDate", endDate.toString());
++            result.put("status", status);
++            return result;
+         } catch (RuntimeException exception) {
+             String error = safeError(exception.getMessage());
+             jdbcTemplate.update("""
+@@ -246,6 +338,175 @@ public class QianchuanService {
+         }
+     }
+ 
++    /**
++     * 纯报表同步：从本地 DB 读取已有账户列表，按授权分组拉取报表。不做账户发现。
++     * 供 QianchuanSyncScheduler 定时调用。
++     */
++    public synchronized Map<String, Object> syncReportOnly(LocalDate startDate, LocalDate endDate) {
++        validateDateRange(startDate, endDate, 30);
++        LocalDateTime startedAt = LocalDateTime.now(SHANGHAI);
++        jdbcTemplate.update("INSERT INTO qianchuan_sync_job (sync_type, start_time, status) VALUES ('REPORT', ?, 'RUNNING')",
++                Timestamp.valueOf(startedAt));
++        Long jobId = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
++        return executeReportSyncBody(jobId, startDate, endDate);
++    }
++
++    /**
++     * 运维面板「立即重跑」。检查并发 → 创建 MANUAL job → 异步执行 → 立即返回 jobId。
++     */
++    public Map<String, Object> manualSync() {
++        Integer running = jdbcTemplate.queryForObject(
++                "SELECT COUNT(*) FROM qianchuan_sync_job WHERE sync_type IN ('REPORT','MANUAL') AND status = 'RUNNING'",
++                Integer.class);
++        if (running != null && running > 0) {
++            throw new IllegalArgumentException("同步进行中，请稍后再试");
++        }
++        LocalDate today = LocalDate.now(SHANGHAI);
++        LocalDateTime startedAt = LocalDateTime.now(SHANGHAI);
++        jdbcTemplate.update("INSERT INTO qianchuan_sync_job (sync_type, start_time, status) VALUES ('MANUAL', ?, 'RUNNING')",
++                Timestamp.valueOf(startedAt));
++        Long jobId = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
++        CompletableFuture.runAsync(() -> {
++            try {
++                syncReportOnlyWithJobId(jobId, today, today);
++            } catch (Exception e) {
++                log.error("[ManualSync] jobId={} 异步执行异常", jobId, e);
++            }
++        });
++        Map<String, Object> result = new LinkedHashMap<>();
++        result.put("jobId", jobId);
++        result.put("status", "RUNNING");
++        return result;
++    }
++
++    private synchronized void syncReportOnlyWithJobId(Long jobId, LocalDate startDate, LocalDate endDate) {
++        executeReportSyncBody(jobId, startDate, endDate);
++    }
++
++    /**
++     * 报表同步核心逻辑（假定 job 记录已创建为 RUNNING）。
++     */
++    private Map<String, Object> executeReportSyncBody(Long jobId, LocalDate startDate, LocalDate endDate) {
++        int accountsSynced = 0;
++        int rowsSynced = 0;
++        int accountsFailed = 0;
++        List<String> failedDetails = new ArrayList<>();
++        try {
++            List<Map<String, Object>> authorizations = jdbcTemplate.queryForList(
++                    "SELECT state FROM qianchuan_authorization WHERE auth_status = 'AUTHORIZED' ORDER BY id");
++            for (Map<String, Object> authorization : authorizations) {
++                String state = String.valueOf(authorization.get("state"));
++                String accessToken;
++                List<Long> advertiserIds;
++                try {
++                    accessToken = getValidAccessToken(state);
++                    advertiserIds = jdbcTemplate.queryForList(
++                            "SELECT advertiser_id FROM qianchuan_account WHERE state = ? AND (topic_supported IS NULL OR topic_supported = 'YES')",
++                            Long.class, state);
++                } catch (RuntimeException authError) {
++                    accountsFailed++;
++                    String msg = safeError(authError.getMessage());
++                    failedDetails.add("auth:" + state + ": " + msg);
++                    log.warn("纯报表同步授权级失败已跳过 state={} error={}", state, msg);
++                    continue;
++                }
++                int[] result = syncReportsForAccounts(accessToken, advertiserIds, startDate, endDate, failedDetails);
++                accountsSynced += result[0];
++                rowsSynced += result[1];
++                accountsFailed += result[2];
++            }
++            String status = failedDetails.isEmpty() ? "SUCCESS" : "PARTIAL";
++            String errorSummary = failedDetails.isEmpty() ? null
++                    : accountsFailed + " 个账户失败: " + String.join("; ", failedDetails.subList(0, Math.min(5, failedDetails.size())));
++            jdbcTemplate.update("""
++                    UPDATE qianchuan_sync_job SET end_time = ?, account_count = ?, row_count = ?, status = ?, error_message = ?
++                     WHERE id = ?
++                    """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI)), accountsSynced, rowsSynced, status, errorSummary, jobId);
++            Map<String, Object> result = new LinkedHashMap<>();
++            result.put("jobId", jobId);
++            result.put("accountCount", accountsSynced);
++            result.put("rowCount", rowsSynced);
++            result.put("accountsFailed", accountsFailed);
++            result.put("startDate", startDate.toString());
++            result.put("endDate", endDate.toString());
++            result.put("status", status);
++            return result;
++        } catch (RuntimeException exception) {
++            String error = safeError(exception.getMessage());
++            jdbcTemplate.update("""
++                    UPDATE qianchuan_sync_job SET end_time = ?, account_count = ?, row_count = ?,
++                           status = 'FAILED', error_message = ? WHERE id = ?
++                    """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI)), accountsSynced, rowsSynced, error, jobId);
++            throw exception;
++        }
++    }
++
++    /**
++     * 对一组 advertiserId 拉取报表，返回 [accountsSynced, rowsSynced, accountsFailed]。
++     * 单账户失败记录到 failedDetails 并跳过，不中断后续账户。
++     */
++    private int[] syncReportsForAccounts(String accessToken, List<Long> advertiserIds,
++                                         LocalDate startDate, LocalDate endDate, List<String> failedDetails) {
++        int accountsSynced = 0;
++        int rowsSynced = 0;
++        int accountsFailed = 0;
++        for (Long advertiserId : advertiserIds) {
++            try {
++                if (!isTopicSupported(accessToken, advertiserId)) {
++                    accountsSynced++;
++                    continue;
++                }
++                rowsSynced += syncReports(accessToken, advertiserId, startDate, endDate);
++                accountsSynced++;
++            } catch (RuntimeException accountError) {
++                accountsFailed++;
++                accountsSynced++;
++                String msg = safeError(accountError.getMessage());
++                failedDetails.add(advertiserId + ": " + msg);
++                log.warn("同步报表单账户失败已跳过 advertiserId={} error={}", advertiserId, msg);
++            }
++        }
++        return new int[]{accountsSynced, rowsSynced, accountsFailed};
++    }
++
++    /**
++     * 探测账户是否支持 SITE_PROMOTION_PRODUCT_AD 报表主题。
++     * 不支持的账户跳过拉取，避免 400153 错误。
++     * 结果缓存到 qianchuan_account 表的 topic_supported 列（首次查询时 NULL=未探测）。
++     */
++    private boolean isTopicSupported(String accessToken, long advertiserId) {
++        // 查缓存
++        List<Map<String, Object>> cached = jdbcTemplate.queryForList(
++                "SELECT topic_supported FROM qianchuan_account WHERE advertiser_id = ?", advertiserId);
++        if (!cached.isEmpty() && cached.get(0).get("topic_supported") != null) {
++            return "YES".equals(String.valueOf(cached.get(0).get("topic_supported")));
++        }
++        try {
++            JsonNode configs = apiClient.reportUniPromotionConfig(accessToken, advertiserId);
++            boolean supported = false;
++            if (configs.isArray()) {
++                for (JsonNode config : configs) {
++                    String topic = QianchuanApiClient.text(config, "data_topic", "value");
++                    if (topic == null) topic = QianchuanApiClient.text(config, "data_topic");
++                    if (DATA_TOPIC.equals(topic)) {
++                        supported = true;
++                        break;
++                    }
++                }
++            }
++            jdbcTemplate.update("UPDATE qianchuan_account SET topic_supported = ? WHERE advertiser_id = ?",
++                    supported ? "YES" : "NO", advertiserId);
++            if (!supported) {
++                log.info("账户不支持 {} 主题，跳过 advertiserId={}", DATA_TOPIC, advertiserId);
++            }
++            return supported;
++        } catch (RuntimeException e) {
++            log.warn("探测报表配置失败 advertiserId={} error={}", advertiserId, safeError(e.getMessage()));
++            // 探测失败时仍尝试拉取（保守策略）
++            return true;
++        }
++    }
++
+     public synchronized Map<String, Object> syncCatalog(LocalDate startDate, LocalDate endDate) {
+         validateDateRange(startDate, endDate, 30);
+ 
+@@ -259,27 +520,39 @@ public class QianchuanService {
+                     "SELECT state FROM qianchuan_authorization WHERE auth_status = 'AUTHORIZED' ORDER BY id");
+             for (Map<String, Object> authorization : authorizations) {
+                 String state = String.valueOf(authorization.get("state"));
+-                List<Long> advertiserIds = syncAccounts(state);
+-                String accessToken = getValidAccessToken(state);
++                List<Long> advertiserIds;
++                String accessToken;
++                try {
++                    advertiserIds = syncAccounts(state);
++                    accessToken = getValidAccessToken(state);
++                } catch (RuntimeException authError) {
++                    log.warn("同步业务数据授权级失败已跳过 state={} error={}", state, safeError(authError.getMessage()));
++                    continue;
++                }
+                 for (Long advertiserId : advertiserIds) {
+-                    syncAccountBalance(accessToken, advertiserId);
+                     try {
+-                        products += syncProducts(accessToken, advertiserId);
+-                    } catch (QianchuanApiException exception) {
+-                        if (exception.getMessage() == null
+-                                || !exception.getMessage().contains("仅支持商家角色客户调用该接口")) {
+-                            throw exception;
++                        syncAccountBalance(accessToken, advertiserId);
++                        try {
++                            products += syncProducts(accessToken, advertiserId);
++                        } catch (QianchuanApiException exception) {
++                            if (exception.getMessage() == null
++                                    || !exception.getMessage().contains("仅支持商家角色客户调用该接口")) {
++                                throw exception;
++                            }
++                            log.info("千川达人账户不支持商家商品列表接口，继续同步计划和素材: advertiserId={}", advertiserId);
+                         }
+-                        log.info("千川达人账户不支持商家商品列表接口，继续同步计划和素材: advertiserId={}", advertiserId);
+-                    }
+-                    List<Long> accountPlans = syncPlans(accessToken, advertiserId, startDate, endDate);
+-                    plans += accountPlans.size();
+-                    for (Long adId : accountPlans) {
+-                        materials += syncMaterials(accessToken, advertiserId, adId);
++                        List<Long> accountPlans = syncPlans(accessToken, advertiserId, startDate, endDate);
++                        plans += accountPlans.size();
++                        for (Long adId : accountPlans) {
++                            materials += syncMaterials(accessToken, advertiserId, adId);
++                            pauseForRateLimit();
++                        }
++                        accounts++;
+                         pauseForRateLimit();
++                    } catch (RuntimeException accountError) {
++                        log.warn("同步业务数据单账户失败已跳过 advertiserId={} error={}",
++                                advertiserId, safeError(accountError.getMessage()));
+                     }
+-                    accounts++;
+-                    pauseForRateLimit();
+                 }
+             }
+             finishSyncJob(jobId, accounts, plans + products + materials, null);
+@@ -820,8 +1093,16 @@ public class QianchuanService {
+                     "SELECT state FROM qianchuan_authorization WHERE auth_status = 'AUTHORIZED' ORDER BY id");
+             for (Map<String, Object> authorization : authorizations) {
+                 String state = String.valueOf(authorization.get("state"));
+-                String token = getValidAccessToken(state);
+-                for (Long advertiserId : syncAccounts(state)) {
++                String token;
++                List<Long> advertiserIds;
++                try {
++                    token = getValidAccessToken(state);
++                    advertiserIds = syncAccounts(state);
++                } catch (RuntimeException authError) {
++                    log.warn("同步评论授权级失败已跳过 state={} error={}", state, safeError(authError.getMessage()));
++                    continue;
++                }
++                for (Long advertiserId : advertiserIds) {
+                     for (int page = 1; page <= 100; page++) {
+                         JsonNode rows = apiClient.commentList(token, advertiserId, startDate.toString(), endDate.toString(), page);
+                         if (!rows.isArray() || rows.isEmpty()) break;
+@@ -1097,6 +1378,59 @@ public class QianchuanService {
+         catch (Exception ignored) { return null; }
+     }
+ 
++    /**
++     * 查询数据同步健康状态（三色点 + 数据截至时间）。
++     */
++    public Map<String, Object> syncStatus() {
++        // 1. 最新成功的 REPORT/MANUAL job 的 end_time
++        List<Map<String, Object>> latestJobs = jdbcTemplate.queryForList("""
++                SELECT end_time FROM qianchuan_sync_job
++                 WHERE sync_type IN ('REPORT', 'MANUAL') AND status IN ('SUCCESS', 'PARTIAL')
++                 ORDER BY end_time DESC LIMIT 1
++                """);
++        LocalDateTime lastSuccessAt = null;
++        if (!latestJobs.isEmpty() && latestJobs.get(0).get("end_time") != null) {
++            Object raw = latestJobs.get(0).get("end_time");
++            lastSuccessAt = raw instanceof java.sql.Timestamp ts ? ts.toLocalDateTime() : null;
++        }
++
++        // 2. 今日 coverage 表成功率
++        LocalDate today = LocalDate.now(SHANGHAI);
++        Map<String, Object> coverage = jdbcTemplate.queryForMap("""
++                SELECT COUNT(*) AS total,
++                       SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS successCount,
++                       SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failedCount
++                  FROM qianchuan_report_sync_coverage WHERE stat_date = ?
++                """, Date.valueOf(today));
++        long totalCov = ((Number) coverage.getOrDefault("total", 0)).longValue();
++        long successCov = ((Number) coverage.getOrDefault("successCount", 0)).longValue();
++        long failedCov = ((Number) coverage.getOrDefault("failedCount", 0)).longValue();
++        double rate = totalCov == 0 ? 0 : (double) successCov / totalCov;
++
++        // 3. 判定颜色
++        String color;
++        LocalDateTime now = LocalDateTime.now(SHANGHAI);
++        if (lastSuccessAt == null) {
++            color = "RED";
++        } else {
++            long minutesSince = java.time.Duration.between(lastSuccessAt, now).toMinutes();
++            if (minutesSince <= 120 && rate >= 0.9) {
++                color = "GREEN";
++            } else if (minutesSince <= 720 && rate >= 0.7) {
++                color = "YELLOW";
++            } else {
++                color = "RED";
++            }
++        }
++
++        Map<String, Object> result = new LinkedHashMap<>();
++        result.put("color", color);
++        result.put("lastSuccessAt", lastSuccessAt);
++        result.put("todayCoverageRate", Math.round(rate * 100) / 100.0);
++        result.put("todayFailedAccounts", failedCov);
++        return result;
++    }
++
+     public List<Map<String, Object>> listSyncJobs(int limit) {
+         return jdbcTemplate.queryForList("""
+                 SELECT id, sync_type AS syncType, start_time AS startTime, end_time AS endTime,
+@@ -1128,29 +1462,23 @@ public class QianchuanService {
+                 error == null ? "SUCCESS" : "FAILED", error, jobId);
+     }
+ 
+-    @Scheduled(cron = "0 20 9 * * ?", zone = "Asia/Shanghai")
++    /**
++     * @deprecated 已由 QianchuanSyncScheduler.scheduledReport() 取代（每30分钟自动拉取）。
++     */
++    @Deprecated
+     public void syncPreviousDay() {
+-        Integer authorizedCount = jdbcTemplate.queryForObject(
+-                "SELECT COUNT(*) FROM qianchuan_authorization WHERE auth_status = 'AUTHORIZED'", Integer.class);
+-        if (authorizedCount == null || authorizedCount == 0) {
+-            return;
+-        }
+-        LocalDate yesterday = LocalDate.now(SHANGHAI).minusDays(1);
+-        try {
+-            sync(yesterday, yesterday);
+-        } catch (Exception exception) {
+-            log.error("千川昨日数据自动同步失败", exception);
+-        }
++        // 保留方法签名避免编译报错，实际逻辑由调度器执行
+     }
+ 
+     @Scheduled(fixedDelay = 600000, initialDelay = 60000)
+     public void refreshExpiringTokens() {
++        LocalDateTime now = LocalDateTime.now(SHANGHAI);
+         List<Map<String, Object>> expiring = jdbcTemplate.queryForList("""
+                 SELECT state FROM qianchuan_authorization
+                  WHERE auth_status = 'AUTHORIZED'
+                    AND (access_expires_at <= ? OR refresh_expires_at <= ?)
+-                """, Timestamp.valueOf(LocalDateTime.now(SHANGHAI).plusHours(1)),
+-                Timestamp.valueOf(LocalDateTime.now(SHANGHAI)));
++                """, Timestamp.valueOf(now.plusHours(1)),
++                Timestamp.valueOf(now.plusDays(REFRESH_PROACTIVE_DAYS)));
+         for (Map<String, Object> item : expiring) {
+             String state = String.valueOf(item.get("state"));
+             try {
+@@ -1161,7 +1489,7 @@ public class QianchuanService {
+         }
+     }
+ 
+-    private List<Long> syncAccounts(String state) {
++    public List<Long> syncAccounts(String state) {
+         String accessToken = getValidAccessToken(state);
+         JsonNode authorizedRows = apiClient.listAuthorizedAdvertisers(accessToken);
+         Map<String, Object> authorizationIdentity = jdbcTemplate.queryForMap(
+@@ -1551,14 +1879,16 @@ public class QianchuanService {
+                 "SELECT access_token, refresh_token, access_expires_at, refresh_expires_at FROM qianchuan_authorization WHERE state = ? AND auth_status = 'AUTHORIZED'", state);
+         LocalDateTime now = LocalDateTime.now(SHANGHAI);
+         LocalDateTime accessExpiry = nullableDatabaseDateTime(authorization.get("access_expires_at"));
+-        if (accessExpiry != null && accessExpiry.isAfter(now.plusHours(1))) {
+-            return String.valueOf(authorization.get("access_token"));
+-        }
+         LocalDateTime refreshExpiry = nullableDatabaseDateTime(authorization.get("refresh_expires_at"));
+         if (refreshExpiry == null || !refreshExpiry.isAfter(now)) {
+             markReauthorizationRequired(state, "刷新凭证已过期，请重新授权");
+             throw new IllegalStateException("授权已过期，请重新发起商家授权");
+         }
++        boolean accessFresh = accessExpiry != null && accessExpiry.isAfter(now.plusHours(1));
++        boolean refreshNearExpiry = !refreshExpiry.isAfter(now.plusDays(REFRESH_PROACTIVE_DAYS));
++        if (accessFresh && !refreshNearExpiry) {
++            return String.valueOf(authorization.get("access_token"));
++        }
+ 
+         try {
+             JsonNode data = apiClient.data(apiClient.refreshToken(String.valueOf(authorization.get("refresh_token"))));
+@@ -1575,7 +1905,11 @@ public class QianchuanService {
+             return accessToken;
+         } catch (RuntimeException exception) {
+             String message = safeError(exception.getMessage());
+-            jdbcTemplate.update("UPDATE qianchuan_authorization SET last_error = ? WHERE state = ?", message, state);
++            if (isRefreshCredentialInvalid(exception)) {
++                markReauthorizationRequired(state, "刷新凭证已失效，请重新授权");
++            } else {
++                jdbcTemplate.update("UPDATE qianchuan_authorization SET last_error = ? WHERE state = ?", message, state);
++            }
+             throw exception;
+         }
+     }
+@@ -1585,6 +1919,43 @@ public class QianchuanService {
+                 reason, state);
+     }
+ 
++    /** 平台明确表示 refresh/access 无效或已撤销时，立刻要求商家重新授权。 */
++    static boolean isRefreshCredentialInvalid(Throwable exception) {
++        Throwable current = exception;
++        while (current != null) {
++            if (current instanceof QianchuanApiException apiException) {
++                if ("凭证无效".equals(apiException.getCategory())) {
++                    return true;
++                }
++                String apiCode = apiException.getApiCode();
++                if ("40102".equals(apiCode) || "40103".equals(apiCode) || "40105".equals(apiCode)
++                        || "HTTP_401".equals(apiCode)) {
++                    return true;
++                }
++            }
++            String message = current.getMessage();
++            if (message != null) {
++                String normalized = message.toLowerCase(Locale.ROOT);
++                if (normalized.contains("refresh_token") && (normalized.contains("invalid")
++                        || normalized.contains("expired") || normalized.contains("过期")
++                        || normalized.contains("无效") || normalized.contains("撤销"))) {
++                    return true;
++                }
++                if (normalized.contains("access_token") && (normalized.contains("invalid")
++                        || normalized.contains("expired") || normalized.contains("过期")
++                        || normalized.contains("无效"))) {
++                    return true;
++                }
++                if (normalized.contains("授权已撤销") || normalized.contains("authorization revoked")
++                        || normalized.contains("token has been revoked")) {
++                    return true;
++                }
++            }
++            current = current.getCause();
++        }
++        return false;
++    }
++
+     private static LocalDateTime parseStatHour(String value) {
+         String normalized = value.replace('T', ' ');
+         if (normalized.length() == 16) {

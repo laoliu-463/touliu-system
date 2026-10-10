@@ -1,0 +1,819 @@
+diff --git a/smart-admin-web-typescript/src/api/business/qianchuan-api.ts b/smart-admin-web-typescript/src/api/business/qianchuan-api.ts
+index 7890ea0..05b60c3 100644
+--- a/smart-admin-web-typescript/src/api/business/qianchuan-api.ts
++++ b/smart-admin-web-typescript/src/api/business/qianchuan-api.ts
+@@ -2,6 +2,7 @@ import { getRequest, postRequest, request } from '/@/lib/axios';
+ 
+ export const qianchuanApi = {
+   dashboard: (params: { startDate: string; endDate: string }) => getRequest('/qianchuan/dashboard', params),
++  dashboardTrend: (params: { startDate: string; endDate: string }) => getRequest('/qianchuan/dashboard/trend', params),
+   listAuthorizations: () => getRequest('/qianchuan/authorizations'),
+   listMerchants: () => getRequest('/qianchuan/merchants'),
+   merchantDetail: (merchantId: string, params: { startDate: string; endDate: string }) =>
+@@ -13,7 +14,8 @@ export const qianchuanApi = {
+   startAuthorization: () => postRequest('/qianchuan/authorization/start', {}),
+   exchangeAuthorization: (state: string, authCode: string) =>
+     postRequest('/qianchuan/authorization/exchange', { state, authCode }),
+-  sync: (startDate: string, endDate: string) => postRequest('/qianchuan/sync', { startDate, endDate }),
++  syncStatus: () => getRequest('/qianchuan/sync-status'),
++  manualSync: () => postRequest('/qianchuan/sync/manual', {}),
+   syncCatalog: (startDate: string, endDate: string) => postRequest('/qianchuan/catalog/sync', { startDate, endDate }),
+   listPlans: () => getRequest('/qianchuan/plans'),
+   listProducts: () => getRequest('/qianchuan/products'),
+diff --git a/smart-admin-web-typescript/src/api/support/operations-api.ts b/smart-admin-web-typescript/src/api/support/operations-api.ts
+index e83f7b6..eb95588 100644
+--- a/smart-admin-web-typescript/src/api/support/operations-api.ts
++++ b/smart-admin-web-typescript/src/api/support/operations-api.ts
+@@ -1,6 +1,7 @@
+-import { getRequest } from '/@/lib/axios';
++import { getRequest, postRequest } from '/@/lib/axios';
+ 
+ export const operationsApi = {
+   overview: () => getRequest('/support/operations/overview'),
+   syncJobs: (syncType?: string) => getRequest('/support/operations/sync-jobs', { syncType, limit: 50 }),
++  manualSync: () => postRequest('/qianchuan/sync/manual', {}),
+ };
+diff --git a/smart-admin-web-typescript/src/views/business/qianchuan/merchant-detail.vue b/smart-admin-web-typescript/src/views/business/qianchuan/merchant-detail.vue
+index d7b8332..274288e 100644
+--- a/smart-admin-web-typescript/src/views/business/qianchuan/merchant-detail.vue
++++ b/smart-admin-web-typescript/src/views/business/qianchuan/merchant-detail.vue
+@@ -7,8 +7,8 @@
+         <h1>{{ detail?.merchant?.merchantName || '商家投流详情' }}</h1>
+         <p>授权主体 ID：{{ merchantId }} <span v-if="detail"> · {{ detail.summary.accountCount }} 个投放账户</span></p>
+       </div>
+-      <a-tag v-if="detail" :color="detail.merchant.status === 'AUTHORIZED' ? 'green' : 'orange'">
+-        {{ detail.merchant.status === 'AUTHORIZED' ? '已授权' : '需检查授权' }}
++      <a-tag v-if="detail" :color="merchantAuthColor(detail.merchant)">
++        {{ merchantAuthLabel(detail.merchant) }}
+       </a-tag>
+     </header>
+     <div class="detail-toolbar">
+@@ -113,6 +113,24 @@ const activeTab = ref('accounts');
+ const requestedDays = computed(() => dates.value[1].diff(dates.value[0], 'day') + 1);
+ const loadedDays = computed(() => detail.value ? dayjs(detail.value.endDate).diff(dayjs(detail.value.startDate), 'day') + 1 : requestedDays.value);
+ const canSyncAccounts = computed(() => detail.value?.merchant?.status === 'AUTHORIZED' && Boolean(Number(detail.value?.merchant?.isValid)));
++
++function merchantAuthLabel(merchant: { status?: string; lastError?: string | null }) {
++  if (merchant.status === 'AUTHORIZED') {
++    return merchant.lastError ? '续期失败，内部处理中' : '自动续期中';
++  }
++  if (merchant.status === 'REAUTH_REQUIRED') return '请联系商家重新授权';
++  if (merchant.status === 'PENDING') return '等待授权';
++  if (merchant.status === 'EXPIRED') return '授权链接过期';
++  return '未知状态';
++}
++
++function merchantAuthColor(merchant: { status?: string; lastError?: string | null }) {
++  if (merchant.status === 'AUTHORIZED') return merchant.lastError ? 'orange' : 'green';
++  if (merchant.status === 'REAUTH_REQUIRED') return 'red';
++  if (merchant.status === 'PENDING') return 'gold';
++  return 'orange';
++}
++
+ let sequence = 0;
+ 
+ async function loadDetail() {
+diff --git a/smart-admin-web-typescript/src/views/support/operations/overview.vue b/smart-admin-web-typescript/src/views/support/operations/overview.vue
+index f6ccb16..8390cd1 100644
+--- a/smart-admin-web-typescript/src/views/support/operations/overview.vue
++++ b/smart-admin-web-typescript/src/views/support/operations/overview.vue
+@@ -76,12 +76,17 @@
+ 
+     <a-card class="page-card" :bordered="false" title="千川同步记录">
+       <template #extra>
+-        <a-select
+-          v-model:value="selectedSyncType"
+-          class="sync-type-select"
+-          :options="syncTypeOptions"
+-          @change="loadSyncJobs"
+-        />
++        <a-space>
++          <a-button type="primary" size="small" :loading="manualSyncLoading" @click="triggerManualSync">
++            立即重跑
++          </a-button>
++          <a-select
++            v-model:value="selectedSyncType"
++            class="sync-type-select"
++            :options="syncTypeOptions"
++            @change="loadSyncJobs"
++          />
++        </a-space>
+       </template>
+       <a-table
+         size="small"
+@@ -121,7 +126,8 @@
+ </template>
+ 
+ <script setup lang="ts">
+-  import { computed, onMounted, ref } from 'vue';
++  import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
++  import { message } from 'ant-design-vue';
+   import { ReloadOutlined } from '@ant-design/icons-vue';
+   import { useRouter } from 'vue-router';
+   import { operationsApi } from '/@/api/support/operations-api';
+@@ -168,6 +174,8 @@
+   const loadError = ref('');
+   const errorModalOpen = ref(false);
+   const selectedJob = ref<SyncJob | null>(null);
++  const manualSyncLoading = ref(false);
++  let manualSyncPollTimer: number | undefined;
+   const offlineStyle = computed(() => ({ color: summary.value.offlineCount > 0 ? '#cf1322' : undefined }));
+ 
+   const syncTypeOptions = computed(() => [
+@@ -269,6 +277,54 @@
+   }
+ 
+   onMounted(refreshAll);
++
++  /**
++   * 运维面板「立即重跑」：触发后端异步 REPORT 同步并轮询该 job 至结束。
++   * 并发拒绝（后端业务码 409）由全局响应拦截器统一弹出提示，这里不重复提示。
++   */
++  async function triggerManualSync() {
++    manualSyncLoading.value = true;
++    try {
++      const response = await operationsApi.manualSync();
++      const jobId = response.data?.jobId as number | undefined;
++      message.success('已触发重跑，正在等待同步结果…');
++      pollJobUntilDone(jobId);
++    } catch (error) {
++      // 拦截器已提示（多为「同步进行中，请稍后再试」），停止 loading 即可。
++      manualSyncLoading.value = false;
++      smartSentry.captureError(error);
++    }
++  }
++
++  function pollJobUntilDone(jobId?: number) {
++    stopManualSyncPolling();
++    manualSyncPollTimer = window.setInterval(async () => {
++      try {
++        const response = await operationsApi.syncJobs();
++        syncJobs.value = response.data || [];
++        const job = jobId ? syncJobs.value.find((item) => item.id === jobId) : syncJobs.value[0];
++        if (job && job.status !== 'RUNNING') {
++          if (job.syncType && !syncTypes.value.includes(job.syncType)) {
++            syncTypes.value = [...syncTypes.value, job.syncType];
++          }
++          stopManualSyncPolling();
++          manualSyncLoading.value = false;
++        }
++      } catch (error) {
++        stopManualSyncPolling();
++        manualSyncLoading.value = false;
++      }
++    }, 3000);
++  }
++
++  function stopManualSyncPolling() {
++    if (manualSyncPollTimer) {
++      clearInterval(manualSyncPollTimer);
++      manualSyncPollTimer = undefined;
++    }
++  }
++
++  onBeforeUnmount(stopManualSyncPolling);
+ </script>
+ 
+ <style lang="less" scoped>
+diff --git a/smart-admin-web-typescript/src/views/system/home/components/OverviewAlertPanels.vue b/smart-admin-web-typescript/src/views/system/home/components/OverviewAlertPanels.vue
+index b32dd76..451ce08 100644
+--- a/smart-admin-web-typescript/src/views/system/home/components/OverviewAlertPanels.vue
++++ b/smart-admin-web-typescript/src/views/system/home/components/OverviewAlertPanels.vue
+@@ -1,6 +1,6 @@
+ <template>
+   <div class="overview-alert-panels-grid">
+-    <!-- 左栏：起量高光账户 (Scaling Accounts) -->
++    <!-- 左栏：消耗头部账户 (Top Spending) -->
+     <div class="panel-card qc-card-refined">
+       <div class="panel-header">
+         <div class="panel-title-group">
+@@ -10,8 +10,8 @@
+               <polyline points="17 6 23 6 23 12" />
+             </svg>
+           </span>
+-          <h4 class="panel-title">起量账户监控</h4>
+-          <span class="qc-pill qc-pill-green">8个爆发中</span>
++          <h4 class="panel-title">消耗头部账户</h4>
++          <span class="qc-pill qc-pill-green" v-if="scalingAccounts.length">{{ scalingAccounts.length }}个投放中</span>
+         </div>
+         <a-button type="link" size="small" class="view-all-btn" @click="emit('navigate', 'accounts')">
+           查看全部账户 →
+@@ -19,7 +19,7 @@
+       </div>
+ 
+       <div class="panel-body">
+-        <div class="scaling-list">
++        <div class="scaling-list" v-if="scalingAccounts.length">
+           <div
+             v-for="(item, index) in scalingAccounts"
+             :key="item.id"
+@@ -36,16 +36,17 @@
+             </div>
+             <div class="spend-stats">
+               <div class="spend-val qc-tabular-nums">¥{{ item.spend.toLocaleString() }}</div>
+-              <div class="growth-rate qc-pill qc-pill-green qc-tabular-nums">
+-                ↑{{ item.growth }}%
++              <div class="growth-rate qc-pill qc-pill-green qc-tabular-nums" v-if="item.roi !== null">
++                ROI {{ item.roi }}x
+               </div>
+             </div>
+           </div>
+         </div>
++        <div class="empty-tip" v-else>暂无投放数据，请先同步报表。</div>
+       </div>
+     </div>
+ 
+-    <!-- 右栏：掉公海与风险雷达 (Risk Radar) -->
++    <!-- 右栏：需重新授权列表 -->
+     <div class="panel-card qc-card-refined">
+       <div class="panel-header">
+         <div class="panel-title-group">
+@@ -56,65 +57,99 @@
+               <line x1="12" y1="16" x2="12.01" y2="16" />
+             </svg>
+           </span>
+-          <h4 class="panel-title">待办风控雷达</h4>
+-          <span class="qc-pill qc-pill-red">5个临期提醒</span>
++          <h4 class="panel-title">需重新授权</h4>
++          <span class="qc-pill qc-pill-red" v-if="riskAlerts.length">{{ riskAlerts.length }}家待处理</span>
+         </div>
+-        <span class="status-summary">防止商户掉入公海</span>
++        <span class="status-summary">仅在授权失效时联系商家</span>
+       </div>
+ 
+       <div class="panel-body">
+-        <div class="alert-list">
++        <div class="alert-list" v-if="riskAlerts.length">
+           <div
+             v-for="alert in riskAlerts"
+             :key="alert.id"
+-            class="risk-item"
+-            :class="{ 'risk-urgent': alert.daysLeft <= 1 }"
++            class="risk-item risk-urgent"
+           >
+             <div class="risk-indicator">
+-              <span class="qc-beacon-alert" v-if="alert.daysLeft <= 1"></span>
+-              <span class="dot-normal" v-else></span>
++              <span class="qc-beacon-alert"></span>
+             </div>
+             <div class="risk-info">
+               <div class="company-name">{{ alert.company }}</div>
+               <div class="owner-text">负责人：{{ alert.owner }} · {{ alert.type }}</div>
+             </div>
+             <div class="risk-action-group">
+-              <span class="time-badge qc-tabular-nums" :class="{ urgent: alert.daysLeft <= 1 }">
+-                剩 {{ alert.daysLeft }} 天到期
+-              </span>
++              <span class="time-badge qc-tabular-nums urgent">请联系商家重新授权</span>
+               <a-button size="small" type="link" class="handle-btn" @click="emit('open-authorization')">
+-                跟进续约
++                联系商家重新授权
+               </a-button>
+             </div>
+           </div>
+         </div>
++        <div class="empty-tip" v-else>暂无需重新授权的商家。</div>
+       </div>
+     </div>
+   </div>
+ </template>
+ 
+ <script setup lang="ts">
+-  import { ref } from 'vue';
++  import { computed } from 'vue';
++
++  const props = defineProps<{
++    accounts?: any[];
++    authorizations?: any[];
++  }>();
+ 
+   const emit = defineEmits<{
+     navigate: [sectionId: string];
+     'open-authorization': [];
+   }>();
+ 
+-  // 模拟起量账户与掉公海账户（贴合投流业务真实场景）
+-  const scalingAccounts = ref([
+-    { id: 'AD-9821', name: '美妆个护-爆品01组', merchant: '广州丽人美妆', operator: '陈文静', spend: 12800, growth: 245 },
+-    { id: 'AD-9822', name: '服饰换季-羽绒专场', merchant: '杭州四季青服饰', operator: '张晨', spend: 9600, growth: 186 },
+-    { id: 'AD-9823', name: '食品生鲜-坚果大促', merchant: '三只果园商贸', operator: '王小伟', spend: 8500, growth: 152 },
+-    { id: 'AD-9824', name: '3C数码-快充配件', merchant: '深圳倍电科技', operator: '赵小雅', spend: 7200, growth: 138 },
+-  ]);
+-
+-  const riskAlerts = ref([
+-    { id: 'R-1', company: '杭州知味观餐饮管理公司', owner: '张三', type: '代投直营', daysLeft: 1 },
+-    { id: 'R-2', company: '广州天慕日化用品有限责任公司', owner: '李四', type: '分佣合作', daysLeft: 2 },
+-    { id: 'R-3', company: '宁波奥拓智能科技有限公司', owner: '王五', type: '代投直营', daysLeft: 2 },
+-    { id: 'R-4', company: '佛山精工家居用品商行', owner: '赵六', type: '分佣合作', daysLeft: 3 },
+-  ]);
++  const scalingAccounts = computed(() =>
++    (props.accounts || [])
++      .filter((account: any) => Number(account.totalSpend) > 0)
++      .sort((a: any, b: any) => Number(b.totalSpend) - Number(a.totalSpend))
++      .slice(0, 4)
++      .map((account: any) => ({
++        id: account.advertiserId,
++        name: account.advertiserName || '未命名账户',
++        merchant: account.merchantName || account.companyName || '未知商家',
++        operator: account.operatorName || '未分配',
++        spend: Number(account.totalSpend || 0),
++        roi: roiOf(account),
++      }))
++  );
++
++  const riskAlerts = computed(() => {
++    const ownerOf = accountMap();
++    return (props.authorizations || [])
++      .filter((item: any) => item.status === 'REAUTH_REQUIRED')
++      .slice(0, 4)
++      .map((item: any) => ({
++        id: item.state || item.advertiserId,
++        company: item.merchantName || '未知商家',
++        owner: ownerOf.get(String(item.advertiserId))?.operatorName || '未分配',
++        type: cooperationLabel(ownerOf.get(String(item.advertiserId))?.cooperationMode || ''),
++      }));
++  });
++
++  function roiOf(account: any) {
++    const spend = Number(account.totalSpend || 0);
++    const gmv = Number(account.totalGmv || 0);
++    if (spend <= 0) return null;
++    return (gmv / spend).toFixed(2);
++  }
++
++  function accountMap() {
++    const map = new Map<string, any>();
++    (props.accounts || []).forEach((account: any) => map.set(String(account.advertiserId), account));
++    return map;
++  }
++
++  function cooperationLabel(mode: string) {
++    if (mode === 'COMMISSION') return '分佣合作';
++    if (mode === 'AGENCY') return '代投直营';
++    return '授权维护';
++  }
+ </script>
+ 
+ <style lang="less" scoped>
+@@ -196,6 +231,13 @@
+     gap: 10px;
+   }
+ 
++  .empty-tip {
++    padding: 20px 0;
++    text-align: center;
++    font-size: 12px;
++    color: var(--qc-text-tertiary);
++  }
++
+   .scaling-item {
+     display: flex;
+     align-items: center;
+diff --git a/smart-admin-web-typescript/src/views/system/home/components/OverviewTrendCharts.vue b/smart-admin-web-typescript/src/views/system/home/components/OverviewTrendCharts.vue
+index 85a206e..6e891c1 100644
+--- a/smart-admin-web-typescript/src/views/system/home/components/OverviewTrendCharts.vue
++++ b/smart-admin-web-typescript/src/views/system/home/components/OverviewTrendCharts.vue
+@@ -17,6 +17,7 @@
+         </div>
+       </div>
+       <div ref="trendChartRef" class="echarts-box"></div>
++      <div class="chart-empty" v-if="!(props.trend || []).length">暂无分时数据，请先同步报表</div>
+     </div>
+ 
+     <!-- 业务结构分布 -->
+@@ -30,16 +31,17 @@
+         </div>
+       </div>
+       <div ref="pieChartRef" class="echarts-box"></div>
++      <div class="chart-empty" v-if="!(props.dashboard.accounts || []).some((a) => Number(a.totalSpend || 0) > 0)">暂无合作模式数据，请先标记合作方式</div>
+       <div class="distribution-legend">
+         <div class="legend-item">
+           <span class="dot dot-commission"></span>
+           <span class="name">分佣模式 (Commission)</span>
+-          <span class="val qc-tabular-nums">52.5%</span>
++          <span class="val qc-tabular-nums">{{ commissionPct }}</span>
+         </div>
+         <div class="legend-item">
+           <span class="dot dot-agency"></span>
+           <span class="name">代投模式 (Agency)</span>
+-          <span class="val qc-tabular-nums">47.5%</span>
++          <span class="val qc-tabular-nums">{{ agencyPct }}</span>
+         </div>
+       </div>
+     </div>
+@@ -47,7 +49,7 @@
+ </template>
+ 
+ <script setup lang="ts">
+-  import { ref, onMounted, onUnmounted, watch } from 'vue';
++  import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+   import * as echarts from 'echarts';
+ 
+   const props = defineProps<{
+@@ -58,6 +60,7 @@
+       accounts?: any[];
+       lastFetchedAt?: string | null;
+     };
++    trend?: any[];
+   }>();
+ 
+   const trendViewMode = ref<'HOURLY' | 'DAILY'>('HOURLY');
+@@ -74,14 +77,19 @@
+ 
+     trendChart = echarts.init(trendChartRef.value);
+ 
+-    const hours = [
+-      '00:00', '02:00', '04:00', '06:00', '08:00', '10:00', 
+-      '12:00', '14:00', '16:00', '18:00', '20:00', '22:00', '24:00'
+-    ];
+-
+-    // 基于真实消耗或平滑模拟的分时形态
+-    const spendData = [1200, 800, 450, 600, 2400, 5800, 8900, 7200, 9400, 13500, 18600, 14200, 8500];
+-    const gmvData = [4800, 3100, 1800, 2400, 9600, 24500, 38000, 31000, 41000, 62000, 89000, 64000, 36000];
++    const points = props.trend || [];
++    const isDaily = trendViewMode.value === 'DAILY';
++    const buckets = new Map<string, { spend: number; gmv: number }>();
++    points.forEach((point: any) => {
++      const key = isDaily ? dayOf(point.time) : hourOf(point.time);
++      const entry = buckets.get(key) || { spend: 0, gmv: 0 };
++      entry.spend += Number(point.spend || 0);
++      entry.gmv += Number(point.gmv || 0);
++      buckets.set(key, entry);
++    });
++    const keys = [...buckets.keys()].sort();
++    const spendData = keys.map((key) => buckets.get(key)!.spend);
++    const gmvData = keys.map((key) => buckets.get(key)!.gmv);
+ 
+     const option: echarts.EChartsOption = {
+       tooltip: {
+@@ -130,7 +138,7 @@
+       },
+       xAxis: {
+         type: 'category',
+-        data: hours,
++        data: keys,
+         boundaryGap: false,
+         axisLine: { lineStyle: { color: '#e2e8f0' } },
+         axisLabel: { color: '#94a3b8', fontSize: 11 },
+@@ -205,6 +213,14 @@
+ 
+     pieChart = echarts.init(pieChartRef.value);
+ 
++    const accounts = props.dashboard.accounts || [];
++    const commissionSpend = accounts
++      .filter((account: any) => account.cooperationMode === 'COMMISSION')
++      .reduce((sum: number, account: any) => sum + Number(account.totalSpend || 0), 0);
++    const agencySpend = accounts
++      .filter((account: any) => account.cooperationMode === 'AGENCY')
++      .reduce((sum: number, account: any) => sum + Number(account.totalSpend || 0), 0);
++
+     const option: echarts.EChartsOption = {
+       tooltip: {
+         trigger: 'item',
+@@ -231,7 +247,7 @@
+             show: true,
+             position: 'center',
+             formatter: () => {
+-              const roiVal = props.dashboard.roi ? `${props.dashboard.roi}x` : '4.08x';
++              const roiVal = props.dashboard.roi ? `${props.dashboard.roi}x` : '--';
+               return `{roi|${roiVal}}\n{label|综合投产比}`;
+             },
+             rich: {
+@@ -251,12 +267,12 @@
+           },
+           data: [
+             {
+-              value: 274612,
++              value: commissionSpend,
+               name: '分佣模式',
+               itemStyle: { color: '#2563eb' },
+             },
+             {
+-              value: 248897,
++              value: agencySpend,
+               name: '代投模式',
+               itemStyle: { color: '#8b5cf6' },
+             },
+@@ -268,6 +284,29 @@
+     pieChart.setOption(option);
+   }
+ 
++  function dayOf(value: any) {
++    return String(value).slice(0, 10);
++  }
++
++  function hourOf(value: any) {
++    const s = String(value);
++    const t = s.indexOf('T');
++    return t >= 0 ? s.slice(t + 1, t + 6) : s.slice(11, 16);
++  }
++
++  const commissionPct = computed(() => piePercent('COMMISSION'));
++  const agencyPct = computed(() => piePercent('AGENCY'));
++
++  function piePercent(mode: string) {
++    const accounts = props.dashboard.accounts || [];
++    const total = accounts.reduce((sum: number, account: any) => sum + Number(account.totalSpend || 0), 0);
++    if (total <= 0) return '0%';
++    const part = accounts
++      .filter((account: any) => account.cooperationMode === mode)
++      .reduce((sum: number, account: any) => sum + Number(account.totalSpend || 0), 0);
++    return `${((part / total) * 100).toFixed(1)}%`;
++  }
++
+   function handleResize() {
+     trendChart?.resize();
+     pieChart?.resize();
+@@ -319,6 +358,7 @@
+     display: flex;
+     flex-direction: column;
+     min-height: 380px;
++    position: relative;
+   }
+ 
+   .chart-header {
+@@ -361,6 +401,19 @@
+     min-height: 280px;
+   }
+ 
++  .chart-empty {
++    position: absolute;
++    inset: 46px 20px 20px 20px;
++    display: flex;
++    align-items: center;
++    justify-content: center;
++    font-size: 12px;
++    color: var(--qc-text-tertiary);
++    background: rgba(248, 250, 252, 0.72);
++    border-radius: 8px;
++    z-index: 1;
++  }
++
+   .distribution-legend {
+     display: flex;
+     justify-content: space-around;
+diff --git a/smart-admin-web-typescript/src/views/system/home/components/overview-components.test.ts b/smart-admin-web-typescript/src/views/system/home/components/overview-components.test.ts
+index bf1f49f..0247c40 100644
+--- a/smart-admin-web-typescript/src/views/system/home/components/overview-components.test.ts
++++ b/smart-admin-web-typescript/src/views/system/home/components/overview-components.test.ts
+@@ -60,21 +60,41 @@ describe('Overview Components', () => {
+   });
+ 
+   it('emits events from OverviewAlertPanels', async () => {
+-    const wrapper = mount(OverviewAlertPanels);
++    const accounts = [
++      { advertiserId: 10, advertiserName: '甲账户', merchantName: '甲商家', operatorName: '张三', totalSpend: 100, totalGmv: 300 },
++    ];
++    const authorizations = [
++      { state: 's1', advertiserId: 10, merchantName: '甲商家', status: 'REAUTH_REQUIRED' },
++    ];
++    const wrapper = mount(OverviewAlertPanels, { props: { accounts, authorizations } });
+ 
+-    expect(wrapper.text()).toContain('起量账户监控');
+-    expect(wrapper.text()).toContain('待办风控雷达');
++    expect(wrapper.text()).toContain('消耗头部账户');
++    expect(wrapper.text()).toContain('需重新授权');
++    expect(wrapper.text()).toContain('甲账户');
++    expect(wrapper.text()).toContain('甲商家');
++    expect(wrapper.text()).toContain('请联系商家重新授权');
++    expect(wrapper.text()).not.toContain('剩 1 天到期');
++    expect(wrapper.text()).not.toContain('REAUTH_REQUIRED');
+ 
+     // 点击查看全部
+     await wrapper.find('.view-all-btn').trigger('click');
+     expect(wrapper.emitted('navigate')).toEqual([['accounts']]);
+ 
+-    // 点击第一个起量账户
++    // 点击第一个头部账户
+     await wrapper.findAll('.scaling-item')[0].trigger('click');
+     expect(wrapper.emitted('navigate')).toEqual([['accounts'], ['accounts']]);
+ 
+-    // 点击续约
++    // 点击联系商家重新授权
+     await wrapper.findAll('.handle-btn')[0].trigger('click');
+     expect(wrapper.emitted('open-authorization')).toBeTruthy();
+   });
++
++  it('shows empty states in OverviewAlertPanels when no data is available', () => {
++    const wrapper = mount(OverviewAlertPanels, { props: { accounts: [], authorizations: [] } });
++
++    expect(wrapper.text()).toContain('暂无投放数据，请先同步报表');
++    expect(wrapper.text()).toContain('暂无需重新授权的商家');
++    expect(wrapper.findAll('.scaling-item').length).toBe(0);
++    expect(wrapper.findAll('.handle-btn').length).toBe(0);
++  });
+ });
+diff --git a/smart-admin-web-typescript/src/views/system/home/composables/useWorkbench.ts b/smart-admin-web-typescript/src/views/system/home/composables/useWorkbench.ts
+index 144759b..6dc5ffc 100644
+--- a/smart-admin-web-typescript/src/views/system/home/composables/useWorkbench.ts
++++ b/smart-admin-web-typescript/src/views/system/home/composables/useWorkbench.ts
+@@ -32,7 +32,9 @@ function createWorkbenchStore() {
+   // 通用状态
+   // ---------------------------------------------------------------------------
+   const loading = ref(false);
+-  const syncing = ref(false);
++  const syncHealth = reactive<{ color: string; lastSuccessAt: string | null; todayCoverageRate: number; todayFailedAccounts: number }>({
++    color: 'GREEN', lastSuccessAt: null, todayCoverageRate: 1, todayFailedAccounts: 0,
++  });
+   const activeSection = ref<WorkbenchSectionId>('overview');
+   const mobileNavigationCollapsed = ref(false);
+   const workbenchContent = ref<HTMLElement>();
+@@ -64,9 +66,7 @@ function createWorkbenchStore() {
+   const authorizationColumns = [
+     { title: '商家', dataIndex: 'merchantName', key: 'merchantName' },
+     { title: '授权主体 ID', dataIndex: 'advertiserId', key: 'advertiserId' },
+-    { title: '状态', key: 'status' },
+-    { title: '授权到期时间', key: 'expiresAt' },
+-    { title: '剩余时间', key: 'daysRemaining' },
++    { title: '授权状态', key: 'status' },
+   ];
+ 
+   // ---------------------------------------------------------------------------
+@@ -368,12 +368,22 @@ function createWorkbenchStore() {
+     return '已同步';
+   }
+ 
+-  function authorizationLabel(status: string) {
+-    return ({ AUTHORIZED: '已授权', PENDING: '等待授权', REAUTH_REQUIRED: '需重新授权', EXPIRED: '授权链接过期' })[status] || status;
++  function authorizationLabel(status: string, lastError?: string | null) {
++    if (status === 'AUTHORIZED') {
++      return lastError ? '续期失败，内部处理中' : '自动续期中';
++    }
++    if (status === 'REAUTH_REQUIRED') return '请联系商家重新授权';
++    if (status === 'PENDING') return '等待授权';
++    if (status === 'EXPIRED') return '授权链接过期';
++    return '未知状态';
+   }
+ 
+-  function authorizationColor(status: string) {
+-    return ({ AUTHORIZED: 'green', PENDING: 'gold', REAUTH_REQUIRED: 'red', EXPIRED: 'orange' })[status] || 'default';
++  function authorizationColor(status: string, lastError?: string | null) {
++    if (status === 'AUTHORIZED') return lastError ? 'orange' : 'green';
++    if (status === 'REAUTH_REQUIRED') return 'red';
++    if (status === 'PENDING') return 'gold';
++    if (status === 'EXPIRED') return 'orange';
++    return 'default';
+   }
+ 
+   function feeRateTypeLabel(rateType: string) {
+@@ -423,13 +433,17 @@ function createWorkbenchStore() {
+   async function loadDashboard() {
+     loading.value = true;
+     try {
+-      const [dashboardResult, authResult, accountsResult, merchantResult] = await Promise.all([
++      const [dashboardResult, authResult, accountsResult, merchantResult, trendResult, syncStatusResult] = await Promise.all([
+         qianchuanApi.dashboard({ startDate: dateValue(startDate.value), endDate: dateValue(endDate.value) }),
+         qianchuanApi.listAuthorizations(),
+         qianchuanApi.listAccounts(),
+         qianchuanApi.listMerchants(),
++        qianchuanApi.dashboardTrend({ startDate: dateValue(startDate.value), endDate: dateValue(endDate.value) }),
++        qianchuanApi.syncStatus(),
+       ]);
++      if (syncStatusResult.data) Object.assign(syncHealth, syncStatusResult.data);
+       Object.assign(dashboard, dashboardResult.data || {});
++      dashboard.trend = trendResult.data || [];
+       // dashboard 的 accounts[] 不含余额/负责人/商务/合作方式，从 /qianchuan/accounts 按账户 ID 补齐
+       const accountExtras = new Map<string, any>((accountsResult.data || []).map((item: any) => [String(item.advertiserId), item]));
+       (dashboard.accounts || []).forEach((account: any) => {
+@@ -450,16 +464,12 @@ function createWorkbenchStore() {
+     }
+   }
+ 
+-  async function syncReports() {
+-    syncing.value = true;
++  async function loadSyncStatus() {
+     try {
+-      const result = await qianchuanApi.sync(dateValue(startDate.value), dateValue(endDate.value));
+-      message.success(`同步完成：${result.data.accountCount} 个账户，${result.data.rowCount} 条小时数据`);
+-      await loadDashboard();
+-    } catch (error) {
+-      showSyncError(error);
+-    } finally {
+-      syncing.value = false;
++      const res = await qianchuanApi.syncStatus();
++      if (res.data) Object.assign(syncHealth, res.data);
++    } catch (e) {
++      console.error('loadSyncStatus', e);
+     }
+   }
+ 
+@@ -933,7 +943,7 @@ function createWorkbenchStore() {
+ 
+   return {
+     // 通用
+-    loading, syncing, activeSection, mobileNavigationCollapsed, workbenchContent,
++    loading, syncHealth, activeSection, mobileNavigationCollapsed, workbenchContent,
+     startDate, endDate, dashboard, isLocalDevelopment,
+     // 商家 / 授权
+     merchants, authorizations, authorizationLoading, authorizationVisible, authorizationStep,
+@@ -962,7 +972,7 @@ function createWorkbenchStore() {
+     roiLevelClass, dateValue, formatMoney, formatNumber, calculateRoi, formatDateTime, formatDateOnly,
+     accountDataStatus, authorizationLabel, authorizationColor, feeRateTypeLabel, monitorRuleLabel,
+     merchantHref, navigateToSection, openSystemManagement, resetAccountFilters, showSyncError,
+-    loadDashboard, syncReports, loadCatalogTab, loadProductReportConfig, queryProductReport,
++    loadDashboard, loadSyncStatus, loadCatalogTab, loadProductReportConfig, queryProductReport,
+     productReportValue, formatProductReportLimits, syncCatalog, setCooperationMode, editCatalogMetadata,
+     loadMonitorData, loadFeeRates, openFeeRateEditor, saveFeeRate, deleteFeeRate, loadMonitorLogs,
+     saveMonitor, saveActionGuardrail, updateMonitorLogHandled, loadBannedTerms, addBannedTerms,
+diff --git a/smart-admin-web-typescript/src/views/system/home/index.vue b/smart-admin-web-typescript/src/views/system/home/index.vue
+index 6cab7ef..6337382 100644
+--- a/smart-admin-web-typescript/src/views/system/home/index.vue
++++ b/smart-admin-web-typescript/src/views/system/home/index.vue
+@@ -15,7 +15,7 @@
+         v-if="reauthorizationCount > 0"
+         type="warning"
+         show-icon
+-        message="有商家授权已失效，需要重新授权后才能继续同步。"
++        message="有商家授权已失效，请联系商家重新授权后才能继续同步。"
+         class="reauthorization-alert"
+       />
+       <a-alert
+diff --git a/smart-admin-web-typescript/src/views/system/home/sections/AuthorizationSection.vue b/smart-admin-web-typescript/src/views/system/home/sections/AuthorizationSection.vue
+index b43a95f..6add51e 100644
+--- a/smart-admin-web-typescript/src/views/system/home/sections/AuthorizationSection.vue
++++ b/smart-admin-web-typescript/src/views/system/home/sections/AuthorizationSection.vue
+@@ -8,7 +8,9 @@
+             <a :href="merchantHref(record.merchantId)">{{ record.merchantName }} →</a>
+           </template>
+           <template v-else-if="column.key === 'status'">
+-            <a-tag :color="authorizationColor(record.status)">{{ authorizationLabel(record.status) }}</a-tag>
++            <a-tag :color="authorizationColor(record.status, record.lastError)">
++              {{ authorizationLabel(record.status, record.lastError) }}
++            </a-tag>
+           </template>
+           <template v-else-if="column.key === 'lastAccountSyncAt'">{{ formatDateTime(record.lastAccountSyncAt) }}</template>
+         </template>
+@@ -32,14 +34,10 @@
+             <span v-else>{{ record.merchantName }}</span>
+           </template>
+           <template v-else-if="column.key === 'status'">
+-            <a-tag :color="authorizationColor(record.status)">{{ authorizationLabel(record.status) }}</a-tag>
+-            <div v-if="record.lastError" class="error-text">{{ record.lastError }}</div>
+-          </template>
+-          <template v-else-if="column.key === 'expiresAt'">{{ formatDateTime(record.refreshExpiresAt) }}</template>
+-          <template v-else-if="column.key === 'daysRemaining'">
+-            <a-tag :color="Number(record.refreshDaysRemaining) <= 7 ? 'orange' : 'blue'">
+-              {{ record.refreshDaysRemaining == null ? '未知' : `${record.refreshDaysRemaining} 天` }}
++            <a-tag :color="authorizationColor(record.status, record.lastError)">
++              {{ authorizationLabel(record.status, record.lastError) }}
+             </a-tag>
++            <div v-if="record.lastError && record.status === 'AUTHORIZED'" class="error-text">{{ record.lastError }}</div>
+           </template>
+         </template>
+       </a-table>
+diff --git a/smart-admin-web-typescript/src/views/system/home/sections/OverviewSection.vue b/smart-admin-web-typescript/src/views/system/home/sections/OverviewSection.vue
+index 9106aca..1375146 100644
+--- a/smart-admin-web-typescript/src/views/system/home/sections/OverviewSection.vue
++++ b/smart-admin-web-typescript/src/views/system/home/sections/OverviewSection.vue
+@@ -11,7 +11,9 @@
+         <a-date-picker v-model:value="endDate" :allow-clear="false" />
+         <a-button :loading="loading" @click="loadDashboard">查询</a-button>
+         <a-button type="primary" @click="openAuthorization">接入商家</a-button>
+-        <a-button :loading="syncing" @click="syncReports">同步数据</a-button>
++        <span class="sync-indicator" :class="syncHealth.color.toLowerCase()">
++          ● 数据截至 {{ syncHealth.lastSuccessAt || '--' }}
++        </span>
+       </a-space>
+     </header>
+ 
+@@ -24,10 +26,12 @@
+     />
+ 
+     <!-- 2. 小时级投放走势与模式分布可视化大盘 -->
+-    <OverviewTrendCharts :dashboard="dashboard" />
++    <OverviewTrendCharts :dashboard="dashboard" :trend="dashboard.trend || []" />
+ 
+-    <!-- 3. 作战指挥与临期/风控雷达双栏 -->
++    <!-- 3. 消耗头部账户与需重新授权双栏 -->
+     <OverviewAlertPanels
++      :accounts="dashboard.accounts || []"
++      :authorizations="authorizations"
+       @navigate="navigateToSection"
+       @open-authorization="openAuthorization"
+     />
+@@ -44,13 +48,23 @@
+     startDate,
+     endDate,
+     loading,
+-    syncing,
++    syncHealth,
+     loadDashboard,
+-    syncReports,
+     openAuthorization,
+     navigateToSection,
+     formatMoney,
+     formatNumber,
+     dashboard,
++    authorizations,
+   } = useWorkbench();
+ </script>
++
++<style scoped>
++.sync-indicator {
++  font-size: 13px;
++  white-space: nowrap;
++}
++.sync-indicator.green { color: #52c41a; }
++.sync-indicator.yellow { color: #faad14; }
++.sync-indicator.red { color: #ff4d4f; }
++</style>

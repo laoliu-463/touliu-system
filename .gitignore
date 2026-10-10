@@ -1,0 +1,16 @@
+# Local secrets / env injection
+env/
+
+# Third-party IDE state
+.qoder/
+
+# Ad-hoc SDK path dumps (debug artifacts, not assets)
+.sdk-all-paths.txt
+.sdk-qianchuan-paths.txt
+
+# Independent sub-repos (each has its own remote on GitHub)
+ad_open_sdk_java/
+qianchuan-mvp-smartadmin/
+
+# Reference prototype (kept out of root repo)
+郑总要的系统/

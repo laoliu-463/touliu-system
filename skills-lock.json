@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "skills": {
+    "apifox-branch": {
+      "source": "apifox/apifox-cli-skills",
+      "sourceType": "github",
+      "skillPath": ".well-known/agent-skills/apifox-branch/SKILL.md",
+      "computedHash": "b8ff8cb2482341e236adbc1cc2258155f7070489815f29690f7e93ae8322ce99"
+    },
+    "apifox-cli": {
+      "source": "apifox/apifox-cli-skills",
+      "sourceType": "github",
+      "skillPath": ".well-known/agent-skills/apifox-cli/SKILL.md",
+      "computedHash": "70c247c0bbbb5b30caebc1515c696596cb50f90c42a5f6767f851fa3a1d4cd6d"
+    },
+    "apifox-cli-checkup": {
+      "source": "apifox/apifox-cli-skills",
+      "sourceType": "github",
+      "skillPath": ".well-known/agent-skills/apifox-cli-checkup/SKILL.md",
+      "computedHash": "9f68703ffad473f1e794329267c7abefcd8b9b6b79954281e2c63a8dddb188ea"
+    },
+    "apifox-import-export": {
+      "source": "apifox/apifox-cli-skills",
+      "sourceType": "github",
+      "skillPath": ".well-known/agent-skills/apifox-import-export/SKILL.md",
+      "computedHash": "d395e60d6ded21926566bcc873b8f2031f39fdc9bafa0a73897bb7b295533182"
+    },
+    "apifox-test-automation": {
+      "source": "apifox/apifox-cli-skills",
+      "sourceType": "github",
+      "skillPath": ".well-known/agent-skills/apifox-test-automation/SKILL.md",
+      "computedHash": "c84f5839246746001084cfb6ee5a4c3c0b57c60a3b49363af535dc13fcb53dcd"
+    },
+    "apifox-test-case": {
+      "source": "apifox/apifox-cli-skills",
+      "sourceType": "github",
+      "skillPath": ".well-known/agent-skills/apifox-test-case/SKILL.md",
+      "computedHash": "68f2b36fb9fb9269dccc1709ec7f98efc9d9774cdc810ee4a1ca28d2e38dcdfb"
+    },
+    "apifox-test-scenario": {
+      "source": "apifox/apifox-cli-skills",
+      "sourceType": "github",
+      "skillPath": ".well-known/agent-skills/apifox-test-scenario/SKILL.md",
+      "computedHash": "7af6573e6ae6f84fcd7d3869181dcf40ec077a658168a21854c29bab33bcb422"
+    },
+    "apifox-workflow-api-lifecycle": {
+      "source": "apifox/apifox-cli-skills",
+      "sourceType": "github",
+      "skillPath": ".well-known/agent-skills/apifox-workflow-api-lifecycle/SKILL.md",
+      "computedHash": "fabb8e147da517cebea65f100a140b42b887017a3d8a7aa50eb559d85de536b9"
+    }
+  }
+}
